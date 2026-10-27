@@ -7046,11 +7046,24 @@ void XE::display13AUXFailRecord(void *port,uint32_t result,uint32_t command) {
 struct Display13PanelTraceEntry {uint64_t time,event,a,b,c,d,e;};
 static Display13PanelTraceEntry display13PanelTraceRing[400];
 static volatile uint32_t display13PanelTraceCount;
+// Rolling ring for later events (sleep/wake); per-frame VBL events excluded.
+static Display13PanelTraceEntry display13PanelRecentRing[512];
+static volatile uint32_t display13PanelRecentCount;
 void XE::display13PanelTrace(uint32_t event,uint64_t a,uint64_t b,uint64_t c,uint64_t d,uint64_t e) {
  if(!callbackXE || !callbackXE->display13PanelDP)return;
+ const auto now=mach_absolute_time();
+ if(event!=31 && event!=32) {
+  const auto r=__sync_fetch_and_add(&display13PanelRecentCount,1);
+  display13PanelRecentRing[r%arrsize(display13PanelRecentRing)]={now,event,a,b,c,d,e};
+  if(event!=5 || !(r&15)) {
+   auto root=IORegistryEntry::getRegistryRoot();
+   root->setProperty("WEXPanelTraceRecent",display13PanelRecentRing,sizeof(display13PanelRecentRing));
+   root->setProperty("WEXPanelTraceRecentCount",r+1,32);
+  }
+ }
  const auto n=__sync_fetch_and_add(&display13PanelTraceCount,1);
  if(n>=arrsize(display13PanelTraceRing))return; // keep the boot-time prefix
- display13PanelTraceRing[n]={mach_absolute_time(),event,a,b,c,d,e};
+ display13PanelTraceRing[n]={now,event,a,b,c,d,e};
  if(event==5 && n>8)return;
  IORegistryEntry::getRegistryRoot()->setProperty("WEXPanelTrace",display13PanelTraceRing,
   sizeof(Display13PanelTraceEntry)*(n+1));

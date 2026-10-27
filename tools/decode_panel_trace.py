@@ -67,11 +67,21 @@ def describe(ev, a, b, c, d, e):
 
 def main():
     text = open(sys.argv[1]).read()
-    m = re.search(r'"WEXPanelTrace" = <([0-9a-f]*)>', text)
+    recent = "--recent" in sys.argv
+    m = re.search(r'"%s" = <([0-9a-f]*)>' % ("WEXPanelTraceRecent" if recent else "WEXPanelTrace"), text)
     if not m:
         print("no trace")
         return
     raw = bytes.fromhex(m.group(1))
+    if recent:
+        # Rolling ring: rotate so the oldest surviving entry comes first.
+        c = re.search(r'"WEXPanelTraceRecentCount" = ([0-9]+)', text)
+        count, slots = (int(c.group(1)) if c else 0), len(raw) // 56
+        if count > slots:
+            start = (count % slots) * 56
+            raw = raw[start:] + raw[:start]
+        else:
+            raw = raw[:count * 56]
     t0 = None
     noise = re.compile(r"attr=(thrm| gdc|pcnt|lddc|asns|hddc)")
     for i in range(len(raw) // 56):
