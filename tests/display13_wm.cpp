@@ -420,7 +420,11 @@ int main() {
     assert(!linearLevel(1920,2200,148500000,5000,4096).enable);
     assert(linearLevel(64,100,10000000,3,100).blocks==3); // Both byte counts below one block select method2.
     assert(!linearLevel(0,2200,148500000,3,2008).enable);
-    assert(!linearLevel(1920,1900,148500000,3,2008).enable);
+    // Pipe-scaler downscale: source width may exceed htotal, but not 3x it.
+    assert(linearLevel(1920,1900,148500000,3,2008).enable);
+    assert(!linearLevel(5701,1900,148500000,3,2008).enable);
+    // HP Envy 2880x1800 panel scanning a 3200-wide HiDPI surface (Y-tiled).
+    assert(yTiledLevel(3200,2960,448000000,3,641).enable);
     assert(!linearLevel(1920,2200,0,3,2008).enable);
     // All supported arithmetic remains bounded even at maximum PCODE block time.
     assert(!linearLevel(16384,16384,2000000000ULL,65793,4096).enable);

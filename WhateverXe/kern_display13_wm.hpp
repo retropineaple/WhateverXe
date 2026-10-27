@@ -104,11 +104,13 @@ struct Plan {
     uint64_t pixelHz {};
     bool yTiled {};
 };
+// A downscaled plane's source width can exceed htotal (pipe scaler); the caller's
+// pixel rate already carries the downscale factor, as in i915.
 // Linear 32bpp RGB8888 or RGB2101010. The +1 block in blocks-per-line and method1, one-line
 // minimum, 10% DDB margin and strict allocation inequality are all required.
 inline Level linearLevel(uint32_t width,uint32_t htotal,uint64_t pixelHz,uint32_t latencyUs,uint32_t allocation) {
     Level l;
-    if(!latencyUs || !width || width>16384 || htotal<width || htotal>16384 ||
+    if(!latencyUs || !width || width>16384 || !htotal || width>3*htotal || htotal>16384 ||
        !pixelHz || pixelHz>2000000000ULL || latencyUs>65793 || !allocation || allocation>4096)return l;
     const auto bpl=ceilDiv(uint64_t(width)*4,512)+1;
     const auto lineTime=ceilDiv(uint64_t(htotal)*1000000,pixelHz);
@@ -161,7 +163,7 @@ inline bool cursorMatches(uint32_t control,uint32_t width,bool allowDisabled=fal
 }
 inline Level yTiledLevel(uint32_t width,uint32_t htotal,uint64_t pixelHz,uint32_t latencyUs,uint32_t allocation) {
     Level l;
-    if(!latencyUs || !width || width>16384 || htotal<width || htotal>16384 ||
+    if(!latencyUs || !width || width>16384 || !htotal || width>3*htotal || htotal>16384 ||
        !pixelHz || pixelHz>2000000000ULL || latencyUs>65793 || !allocation || allocation>4096)return l;
     const auto tileBlocks=ceilDiv(uint64_t(width)*4*4,512)+1;
     const auto bpl=tileBlocks*65536/4;
