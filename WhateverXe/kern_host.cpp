@@ -6,6 +6,8 @@
 #include <Headers/kern_api.hpp>
 #include <Headers/kern_iokit.hpp>
 #include <IOKit/pci/IOPCIDevice.h>
+#include <IOKit/acpi/IOACPIPlatformDevice.h>
+static void dumpPanelACPITables();
 XeHost *XeHost::callbackHost;
 struct FramebufferViewer : public IOFramebuffer {
  static IOMemoryMap *&getVramMap(IOFramebuffer *fb) { return static_cast<FramebufferViewer *>(fb)->fVramMap; }
@@ -75,6 +77,7 @@ void XeHost::processKernel(KernelPatcher &patcher) {
 void XeHost::processKext(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size) {
  if(!active)return;
  if(backlight.loadIndex==index) {
+  if(backlightPanelEDP)dumpPanelACPITables();
   if(backlightEnabled) {
    KernelPatcher::RouteRequest route("__ZN15AppleIntelPanel10setDisplayEP9IODisplay",wrapPanelSetDisplay,orgPanelSetDisplay);
    const bool ready=patcher.routeMultiple(index,&route,1,address,size);
@@ -216,3 +219,20 @@ void XeHost::wrapFramebufferInit(IOFramebuffer *fb) {
 	}
 }
 
+
+// -wex-adlp-edp diagnostics: publish the firmware DSDT/SSDTs (read-only) so the
+// brightness-key notify target can be found; macOS no longer exposes them.
+static void dumpPanelACPITables() {
+ // Name-based checks only: WhateverXe does not link against IOACPIFamily.
+ auto entry=IORegistryEntry::fromPath("/_SB",IORegistryEntry::getPlane("IOACPIPlane"));
+ if(!entry)return;
+ if(!entry->metaCast("IOACPIPlatformDevice")){entry->release();return;}
+ auto sb=static_cast<IOACPIPlatformDevice *>(entry);
+ auto root=IORegistryEntry::getRegistryRoot();
+ if(auto dsdt=sb->getACPITableData("DSDT",0))root->setProperty("WEXACPI-DSDT",const_cast<OSData *>(dsdt));
+ for(unsigned i=0;i<32;++i) {
+  auto ssdt=sb->getACPITableData("SSDT",i);if(!ssdt)break;
+  char key[24];snprintf(key,sizeof(key),"WEXACPI-SSDT-%u",i);root->setProperty(key,const_cast<OSData *>(ssdt));
+ }
+ sb->release();
+}

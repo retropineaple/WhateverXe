@@ -47,6 +47,7 @@ namespace XeDataAccess {bool processKext(KernelPatcher&,size_t,mach_vm_address_t
 struct Graphics {size_t loadIndex=4;bool off=false;void switchOff(){off=true;}} graphics;
 struct {size_t loadIndex=5;}backlight;
 static bool checkKernelArgument(const char *){return false;}
+static void dumpPanelACPITables(){}
 struct XeHost {
  bool active=false,backlightEnabled=false,backlightPanelEDP=false;enum {FB_DETECT,FB_RESET,FB_COPY,FB_ZEROFILL,FB_NONE,FB_TOTAL};uint32_t resetFramebuffer=FB_NONE;
  IOPCIDevice *backlightGPU=nullptr;
