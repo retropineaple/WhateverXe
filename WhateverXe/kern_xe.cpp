@@ -7184,6 +7184,38 @@ void XE::wrapPanelSetupTiming(IOService *fb,const void *timing,void *out) {
   (uint64_t(field(o,0x40))<<32)|field(o,0x50),empty|(uint64_t(empty && usable)<<1),
   fb && fb->getMetaClass()->getClassSize()>=0x4B90 ? uint32_t(Display13FBMemory::field<int32_t>(fb,0x4250)) : UINT32_MAX);
 }
+// hwSetInterruptState drops a request while the FB has no active display
+// path (+4A00 == 0), which is the case inside a modeset. A VBL enable lost
+// there is never re-applied, so every later flip fails ("Flip called
+// without enabling VBL"). Remember the last rejected request for FB0 and
+// replay it once the path exists again.
+struct Display13PendingInterrupt {void *controller,*ref;uint32_t state;IOService *fb;bool pending;};
+static Display13PendingInterrupt display13PendingVBL;
+static mach_vm_address_t display13OrgInterruptState;
+static uint32_t display13FBPathCount(IOService *fb) {
+ if(!fb || fb->getMetaClass()->getClassSize()<0x4B90)return 0;
+ return Display13FBMemory::field<int32_t>(fb,0x3FD8)==-1 ? Display13FBMemory::field<uint32_t>(fb,0x49E8) :
+  Display13FBMemory::field<uint32_t>(fb,0x4A00);
+}
+uint32_t XE::wrapPanelInterruptState(void *controller,void *ref,uint32_t state,IOService *fb) {
+ const auto paths=display13FBPathCount(fb);
+ const auto r=FunctionCast(wrapPanelInterruptState,callbackXE->orgPanelInterruptState)(controller,ref,state,fb);
+ const bool fb0=fb && fb->getMetaClass()->getClassSize()>=0x4B90 && Display13FBMemory::field<uint32_t>(fb,0x1DC)==0;
+ if(fb0) {
+  if(r && !paths)display13PendingVBL={controller,ref,state,fb,true};
+  else if(display13PendingVBL.ref==ref)display13PendingVBL.pending=false;
+  display13PanelTrace(31,state,r,paths,controller ? Display13FBMemory::field<uint32_t>(controller,0xE14) : UINT32_MAX,
+   uint64_t(display13PendingVBL.pending));
+ }
+ return r;
+}
+void XE::display13ReplayVBL() {
+ auto &p=display13PendingVBL;
+ if(!p.pending || !p.fb || !display13FBPathCount(p.fb) || !display13OrgInterruptState)return;
+ p.pending=false;
+ const auto r=reinterpret_cast<uint32_t (*)(void *,void *,uint32_t,IOService *)>(display13OrgInterruptState)(p.controller,p.ref,p.state,p.fb);
+ display13PanelTrace(32,p.state,r,display13FBPathCount(p.fb),Display13FBMemory::field<uint32_t>(p.controller,0xE14));
+}
 bool XE::processDisplay13PanelTrace(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size) {
  const char *changed="__ZN21AppleIntelFramebuffer17connectionChangedEv";
  const char *online="__ZN21AppleIntelFramebuffer13getOnlineInfoEP21AppleIntelDisplayPathPhS2_";
@@ -7205,11 +7237,17 @@ bool XE::processDisplay13PanelTrace(KernelPatcher &patcher,size_t index,mach_vm_
  const uint8_t timingEntry[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x54,0x53,0x48,0x81,0xec,0xb0,0,0,0};
  const auto t=patcher.solveSymbol<mach_vm_address_t>(index,timingSym,address,size);patcher.clearError();
  if(t!=address+0x6814C || memcmp(reinterpret_cast<void *>(t),timingEntry,sizeof(timingEntry)))return false;
+ const char *irqSym="__ZN31AppleIntelFramebufferController19hwSetInterruptStateEPvjP21AppleIntelFramebuffer";
+ const uint8_t irqEntry[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x38};
+ const auto q=patcher.solveSymbol<mach_vm_address_t>(index,irqSym,address,size);patcher.clearError();
+ if(q!=address+0x7229A || memcmp(reinterpret_cast<void *>(q),irqEntry,sizeof(irqEntry)))return false;
  KernelPatcher::RouteRequest routes[]={{changed,wrapPanelConnectionChanged,orgPanelConnectionChanged},
   {online,wrapPanelGetOnlineInfo,orgPanelGetOnlineInfo},{probe,wrapPanelConnectionProbe,orgPanelConnectionProbe},
-  {current,wrapPanelCurrentMode,orgPanelCurrentMode},{timingSym,wrapPanelSetupTiming,orgPanelSetupTiming}};
+  {current,wrapPanelCurrentMode,orgPanelCurrentMode},{timingSym,wrapPanelSetupTiming,orgPanelSetupTiming},
+  {irqSym,wrapPanelInterruptState,orgPanelInterruptState}};
  const bool ok=patcher.routeMultipleShort(index,routes,arrsize(routes),address,size);patcher.clearError();
  IORegistryEntry::getRegistryRoot()->setProperty("WEXPanelTraceReady",ok);
+ display13OrgInterruptState=ok ? orgPanelInterruptState : 0;
  // IntelFBClientControl::doAttribute forwards AGDC's per-FB online request to
  // SetFbStatusOnNextProbe, which clears FB0's connected byte when the donor
  // sees no built-in panel. The panel is the only output here: make the AGDC
@@ -8182,7 +8220,7 @@ uint32_t XE::wrapAlderLakeNConnectionAttr(IOService *fb,int connection,uint32_t 
     r[5]=result;r[6]=!result && value ? *value : 0;adlnFrontendSnapshot(fb,r);adlnPublishFrontend("Attr","Last",r);
     if(attribute=='enab' || attribute=='cena' || attribute=='chng' || attribute=='flgs')
         display13PanelTrace(1,r[2],attribute,result,r[6],display13FBState(fb));
-    if(callbackXE->display13PanelDP && r[2]==0)display13PanelLiveState();
+    if(callbackXE->display13PanelDP && r[2]==0){display13ReplayVBL();display13PanelLiveState();}
     if(attribute=='cena' || attribute=='enab' || attribute=='flgs') {
         char key[64];snprintf(key,sizeof(key),"N97FBAttr%u_%08x",static_cast<uint32_t>(r[2]),attribute);
         IORegistryEntry::getRegistryRoot()->setProperty(key,r,sizeof(r));

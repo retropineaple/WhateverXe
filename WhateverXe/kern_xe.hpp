@@ -183,7 +183,9 @@ private:
  bool processDisplay13PanelTrace(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size);
  mach_vm_address_t orgPanelConnectionChanged {},orgPanelGetOnlineInfo {},orgPanelConnectionProbe {};
  static uint32_t wrapPanelConnectionProbe(IOService *fb);
- mach_vm_address_t orgPanelCurrentMode {},orgPanelSetupTiming {};
+ mach_vm_address_t orgPanelCurrentMode {},orgPanelSetupTiming {},orgPanelInterruptState {};
+ static uint32_t wrapPanelInterruptState(void *controller,void *ref,uint32_t state,IOService *fb);
+ static void display13ReplayVBL();
  static void wrapPanelSetupTiming(IOService *fb,const void *timing,void *out);
  static uint32_t wrapPanelCurrentMode(IOService *fb,int *mode,int *depth);
  static uint32_t wrapPanelConnectionChanged(IOService *fb);

@@ -4,7 +4,7 @@ import re, struct, sys
 
 NAMES = {1: "attr", 4: "probe", 5: "AUXFAIL", 6: "enablePort", 7: "disablePort", 8: "trainPat",
          9: "clkOn", 10: "clkOff", 11: "DDC", 20: "connChg>", 21: "connChg<", 22: "online>",
-         23: "online<", 24: "connProbe", 25: "curMode", 26: "linkBW", 27: "setupTim", 28: "rateSel", 29: "rateCap", 30: "bootAdopt"}
+         23: "online<", 24: "connProbe", 25: "curMode", 26: "linkBW", 27: "setupTim", 28: "rateSel", 29: "rateCap", 30: "bootAdopt", 31: "irqState", 32: "vblReplay"}
 ALL = (1 << 64) - 1
 
 
@@ -42,6 +42,10 @@ def describe(ev, a, b, c, d, e):
         return "LINK_BW_SET %#x -> LINK_RATE_SET index %d (res=%x) lanes=%#x" % (a, b, c, d)
     if ev == 29:
         return "DPCD %#x max rate %#x -> %#x" % (a, b, c)
+    if ev == 31:
+        return "state=%#x res=%x paths=%d ctl.e14=%#x pending=%d" % (a, b, c, d, e)
+    if ev == 32:
+        return "replay state=%#x res=%x paths=%d ctl.e14=%#x" % (a, b, c, d)
     if ev == 4:
         return "ddi=%d res=%x mode=%d conn=%d %s" % (a, b, c, d, link(e))
     if ev == 11:
