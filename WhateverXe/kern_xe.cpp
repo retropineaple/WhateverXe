@@ -7001,7 +7001,7 @@ void XE::display13AUXFailRecord(void *port,uint32_t result,uint32_t command) {
  auto &c=display13FBPower;static volatile uint32_t count;
  const auto n=__sync_add_and_fetch(&count,1);
  if(n>4 && n%64)return; // first four, then every 64th
- uint64_t r[40] {2,n,result,command};
+ uint64_t r[46] {3,n,result,command};
  auto object=static_cast<OSObject *>(port);
  if(object && object->getMetaClass()->getClassSize()>=0x580) {
   r[4]=Display13FBMemory::field<uint32_t>(port,0x120);r[5]=Display13FBMemory::field<uint32_t>(port,0x550);
@@ -7014,6 +7014,9 @@ void XE::display13AUXFailRecord(void *port,uint32_t result,uint32_t command) {
    const uint32_t regs[]={0x45404,0x45440,0x45444,0x45454,0x64000,0x64010,0xC7200,0xC7204,0xC4000,0xC4030,
     0x60400,0x70008,0x46140,0x164280,0x46014,0x60540};
    for(unsigned i=0;i<arrsize(regs);++i)r[7+i]=(uint64_t(regs[i])<<32)|io.read(regs[i]);
+   // DC state, DC debug counters, Combo PHY A misc/compensation/lane power.
+   const uint32_t extra[]={0x45504,0x101084,0x101088,0x64C00,0x162100,0x162028};
+   for(unsigned i=0;i<arrsize(extra);++i)r[40+i]=(uint64_t(extra[i])<<32)|io.read(extra[i]);
   }
   auto &b=c.bridge;auto &link=c.mainLink[0];
   r[23]=b.begun|(b.state.faulted<<1)|(b.state.suspended<<2)|(b.bootAdopted<<3)|(c.clockFaulted<<4)|(c.memoryFaulted<<5)|(c.clockStopped<<6);
@@ -7704,9 +7707,12 @@ void XE::wrapDisplay13GMBusWrite(void *access,uint64_t reg,uint32_t value) {
     if(display13DeferClock(access,reg,value,reinterpret_cast<uintptr_t>(__builtin_return_address(0))))return;
     // -wex-adlp-edp: the panel is driven as a fixed DP sink, so nothing may
     // power it down through PPS 0. Record donor PPS/AUX-well writes.
-    if(callbackXE->display13PanelDP && (reg==0xC7204 || reg==0x45444 || reg==0x45440 || reg==0x45404)) {
+    if(callbackXE->display13PanelDP && (reg==0xC7204 || reg==0x45444 || reg==0x45440 || reg==0x45404 || reg==0x45504)) {
         const uint32_t original=value;
         if(reg==0xC7204 && !(value&1))value|=0x7; // keep power-on, reset and backlight enable
+        // No DMC program is loaded (-disablegfxfirmware): DC3CO/DC5/DC6 would
+        // power-gate the display engine, including AUX, once pipes go idle.
+        if(reg==0x45504)value&=~((1U<<30)|3U);
         display13PanelWriteRecord(reg,original,value,reinterpret_cast<uintptr_t>(__builtin_return_address(0)));
     }
     // DISPLAY13_COMBO_FRACTION: qualified nominal writer, physical reference,
