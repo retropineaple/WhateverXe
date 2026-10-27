@@ -7253,6 +7253,38 @@ uint32_t XE::wrapPanelValidateMode(IOService *fb,int mode,const void **desc,cons
  static uint32_t count;if(++count<=4)display13PanelTrace(33,uint32_t(mode),r,count);
  return 0;
 }
+uint32_t XE::display13PanelSetBrightness(IOService *fb,uint32_t value) {
+ auto s=callbackXE;
+ auto path=Display13FBMemory::singlePath<OSObject *>(fb);
+ auto port=path && path->getMetaClass()->getClassSize()>=0x3730 ? Display13FBMemory::field<void *>(path,0x3648) : nullptr;
+ if(!port)return kIOReturnNotReady;
+ // Floor at ~0.8%: DPCD 0 turns the OLED fully dark, unlike a PWM minimum.
+ const uint32_t level=value<0x200 ? 0x200 : value>0xFFFF ? 0xFFFF : value;
+ uint8_t bytes[2]={uint8_t(level>>8),uint8_t(level)};
+ auto r=wrapDisplay13WriteAUX(port,0x722,bytes,2);
+ if(!r && !s->panelBrightnessDPCD) {
+  // Brightness first, then select DPCD control (0x721 bits 1:0 = 2) and
+  // enable the backlight over AUX (0x720 bit 0), as the panel advertises.
+  uint8_t mode=0,control=0;
+  r=wrapDisplay13ReadAUX(port,0x720,&control,1);
+  if(!r)r=wrapDisplay13ReadAUX(port,0x721,&mode,1);
+  if(!r){mode=uint8_t((mode&~3U)|2U);r=wrapDisplay13WriteAUX(port,0x721,&mode,1);}
+  if(!r && !(control&1)){control|=1;r=wrapDisplay13WriteAUX(port,0x720,&control,1);}
+  if(!r)s->panelBrightnessDPCD=true;
+ }
+ display13PanelTrace(34,value,level,r,s->panelBrightnessDPCD);
+ return r;
+}
+uint32_t XE::wrapPanelSetAttr(IOService *fb,int connection,uint32_t attribute,uintptr_t value) {
+ auto s=callbackXE;
+ if(s->display13PanelDP && attribute=='bklt' && !connection && fb && fb->getMetaClass()->getClassSize()>=0x4B90 &&
+    !Display13FBMemory::field<uint32_t>(fb,0x1DC)) {
+  s->panelBrightness=value>0xFFFF ? 0xFFFF : uint32_t(value);
+  const auto r=display13PanelSetBrightness(fb,s->panelBrightness);
+  return r ? r : kIOReturnSuccess;
+ }
+ return FunctionCast(wrapPanelSetAttr,s->orgPanelSetAttr)(fb,connection,attribute,value);
+}
 bool XE::processDisplay13PanelTrace(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size) {
  const char *changed="__ZN21AppleIntelFramebuffer17connectionChangedEv";
  const char *online="__ZN21AppleIntelFramebuffer13getOnlineInfoEP21AppleIntelDisplayPathPhS2_";
@@ -7306,6 +7338,15 @@ bool XE::processDisplay13PanelTrace(KernelPatcher &patcher,size_t index,mach_vm_
   patcher.clearError();
  }
  IORegistryEntry::getRegistryRoot()->setProperty("WEXPanelAGDCOnlineIgnored",agdc);
+ const char *setAttrSym="__ZN21AppleIntelFramebuffer25setAttributeForConnectionEijm";
+ const uint8_t setAttrEntry[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x18};
+ const auto sa=patcher.solveSymbol<mach_vm_address_t>(index,setAttrSym,address,size);patcher.clearError();
+ bool backlight=false;
+ if(sa==address+0x352D4 && !memcmp(reinterpret_cast<void *>(sa),setAttrEntry,sizeof(setAttrEntry))) {
+  KernelPatcher::RouteRequest setRoute[]={{setAttrSym,wrapPanelSetAttr,orgPanelSetAttr}};
+  backlight=patcher.routeMultipleShort(index,setRoute,arrsize(setRoute),address,size);patcher.clearError();
+ }
+ IORegistryEntry::getRegistryRoot()->setProperty("WEXPanelBacklightReady",backlight);
  return ok;
 }
 
@@ -8257,6 +8298,12 @@ uint32_t XE::wrapDisplay13FBEnable(IOService *fb) {
     r[5]=result;adlnFrontendSnapshot(fb,r);adlnPublishFrontend("Enable","Last",r);return result;
 }
 uint32_t XE::wrapAlderLakeNConnectionAttr(IOService *fb,int connection,uint32_t attribute,unsigned long *value) {
+    // -wex-adlp-edp: FB0 is the AUX-brightness OLED; the donor only answers
+    // 'bklt' for a native internal (PWM) panel. Report {value,min,max}.
+    if(callbackXE->display13PanelDP && attribute=='bklt' && !connection && value && fb &&
+       fb->getMetaClass()->getClassSize()>=0x4B90 && !Display13FBMemory::field<uint32_t>(fb,0x1DC)) {
+        value[0]=callbackXE->panelBrightness;value[1]=0;value[2]=0xFFFF;return kIOReturnSuccess;
+    }
     uint64_t r[16] {1,2,0,static_cast<uint32_t>(connection),attribute};
     adlnFrontendSnapshot(fb,r);adlnPublishFrontend("Attr","Entry",r);
     const auto result=FunctionCast(wrapAlderLakeNConnectionAttr,callbackXE->orgAlderLakeNConnectionAttr)(fb,connection,attribute,value);

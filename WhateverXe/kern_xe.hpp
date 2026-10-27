@@ -187,6 +187,10 @@ private:
  static uint32_t wrapPanelInterruptState(void *controller,void *ref,uint32_t state,IOService *fb);
  static void display13ReplayVBL();
  mach_vm_address_t orgPanelValidateMode {},panelProgrammedMode {};
+ // -wex-adlp-edp backlight: VESA eDP DPCD brightness (0x720-0x723) behind 'bklt'.
+ mach_vm_address_t orgPanelSetAttr {};uint32_t panelBrightness {0x8000};bool panelBrightnessDPCD {};
+ static uint32_t wrapPanelSetAttr(IOService *fb,int connection,uint32_t attribute,uintptr_t value);
+ static uint32_t display13PanelSetBrightness(IOService *fb,uint32_t value);
  static uint32_t wrapPanelValidateMode(IOService *fb,int mode,const void **desc,const void **timing);
  static void wrapPanelSetupTiming(IOService *fb,const void *timing,void *out);
  static uint32_t wrapPanelCurrentMode(IOService *fb,int *mode,int *depth);
