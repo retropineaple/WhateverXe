@@ -176,6 +176,8 @@ private:
 
  static uint8_t *display13SSTPort(void *port,bool unprobed=false);
  static void display13SSTPortRecord(void *port);
+ static void display13PanelWriteRecord(uint32_t reg,uint32_t original,uint32_t value,uintptr_t caller);
+ static void display13AUXFailRecord(void *port,uint32_t result,uint32_t command);
  static bool display13HDMIPort(void *port);
  static uint32_t wrapDisplay13TrainingPattern(void *path,uint32_t pattern);
  static uint32_t wrapDisplay13SignalLevels(void *port,uint32_t swing,uint32_t emphasis,void *overrideConfig);

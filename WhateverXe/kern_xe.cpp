@@ -6987,6 +6987,50 @@ bool XE::display13AUXReady(void *port,bool command) {
  Display13FBPowerIO io {c.map};return c.bridge.beginAUXCommand(io,config[0]);
 }
 
+// -wex-adlp-edp diagnostics. Writes are recorded lock-free from the register
+// writer; publication happens from the AUX failure path (thread context).
+struct Display13PanelWrite {uint32_t reg,original,value,caller;};
+static Display13PanelWrite display13PanelWrites[48];
+static volatile uint32_t display13PanelWriteCount;
+void XE::display13PanelWriteRecord(uint32_t reg,uint32_t original,uint32_t value,uintptr_t caller) {
+ const auto n=__sync_fetch_and_add(&display13PanelWriteCount,1);
+ const auto image=callbackXE->framebufferClockImage;
+ display13PanelWrites[n%48]={reg,original,value,uint32_t(image && caller>=image ? caller-image : 0xFFFFFFFFU)};
+}
+void XE::display13AUXFailRecord(void *port,uint32_t result,uint32_t command) {
+ auto &c=display13FBPower;static volatile uint32_t count;
+ const auto n=__sync_add_and_fetch(&count,1);
+ if(n>4 && n%64)return; // first four, then every 64th
+ uint64_t r[40] {2,n,result,command};
+ auto object=static_cast<OSObject *>(port);
+ if(object && object->getMetaClass()->getClassSize()>=0x580) {
+  r[4]=Display13FBMemory::field<uint32_t>(port,0x120);r[5]=Display13FBMemory::field<uint32_t>(port,0x550);
+  r[6]=Display13FBMemory::field<uint32_t>(port,0x554);
+ }
+ if(c.lock) {
+  IOLockLock(c.lock);
+  if(c.map && c.map->getVirtualAddress()) {
+   Display13FBSSTIO io{c.map};
+   const uint32_t regs[]={0x45404,0x45440,0x45444,0x45454,0x64000,0x64010,0xC7200,0xC7204,0xC4000,0xC4030,
+    0x60400,0x70008,0x46140,0x164280,0x46014,0x60540};
+   for(unsigned i=0;i<arrsize(regs);++i)r[7+i]=(uint64_t(regs[i])<<32)|io.read(regs[i]);
+  }
+  auto &b=c.bridge;auto &link=c.mainLink[0];
+  r[23]=b.begun|(b.state.faulted<<1)|(b.state.suspended<<2)|(b.bootAdopted<<3)|(c.clockFaulted<<4)|(c.memoryFaulted<<5)|(c.clockStopped<<6);
+  r[24]=b.auxRefs[0];r[25]=b.ddiRefs[0];r[26]=b.auxCommands[0];r[27]=b.auxLease[0].domains;
+  r[28]=link.owner!=0;r[29]=link.bootPending;r[30]=link.lease.domains;r[31]=b.state.owned;r[32]=b.state.borrowed;
+  for(unsigned i=0;i<6;++i)r[33+i]=b.state.refs[i];
+  IOLockUnlock(c.lock);
+ }
+ r[39]=display13PanelWriteCount;
+ auto root=IORegistryEntry::getRegistryRoot();
+ if(n==1)root->setProperty("WEXDisplay13AUXFailFirst",r,sizeof(r));
+ root->setProperty("WEXDisplay13AUXFailLast",r,sizeof(r));
+ Display13PanelWrite copy[48];memcpy(copy,display13PanelWrites,sizeof(copy));
+ root->setProperty("WEXDisplay13PanelWrites",copy,sizeof(copy));
+ root->setProperty("WEXDisplay13PanelWriteCount",display13PanelWriteCount,32);
+}
+
 uint32_t XE::wrapDisplay13ReadAUX(void *port,uint32_t address,void *data,uint32_t length) {
  auto &c=display13FBPower;if(!c.lock)return kIOReturnNotReady;
  IOLockLock(c.lock);const bool ready=display13AUXReady(port,false);IOLockUnlock(c.lock);
@@ -7015,8 +7059,9 @@ uint32_t XE::wrapDisplay13RunAUX(void *port,uint32_t command,uint32_t *packet,ui
  auto &c=display13FBPower;if(!c.lock)return kIOReturnNotReady;
  IOLockLock(c.lock);const bool ready=display13AUXReady(port,true);
  const auto ddi=ready ? Display13FBMemory::field<uint32_t>(port,0x120) : 7;
- IOLockUnlock(c.lock);if(!ready)return kIOReturnNotReady;
+ IOLockUnlock(c.lock);if(!ready){if(callbackXE->display13PanelDP)display13AUXFailRecord(port,UINT32_MAX,command);return kIOReturnNotReady;}
  const auto r=FunctionCast(wrapDisplay13RunAUX,callbackXE->orgDisplay13RunAUX)(port,command,packet,length,flag);
+ if(r && callbackXE->display13PanelDP)display13AUXFailRecord(port,r,command);
  IOLockLock(c.lock);Display13FBPowerIO io {c.map};const bool held=c.bridge.endAUXCommand(io,ddi);
  const bool complete=display13AUXReady(port,false) && held;
  if(!complete)adlnFault(c.bridge.state.faulted,__LINE__);
@@ -7657,6 +7702,13 @@ void XE::wrapAlderLakeNGamma10(void *path,void *transaction,uint32_t control) {
 
 void XE::wrapDisplay13GMBusWrite(void *access,uint64_t reg,uint32_t value) {
     if(display13DeferClock(access,reg,value,reinterpret_cast<uintptr_t>(__builtin_return_address(0))))return;
+    // -wex-adlp-edp: the panel is driven as a fixed DP sink, so nothing may
+    // power it down through PPS 0. Record donor PPS/AUX-well writes.
+    if(callbackXE->display13PanelDP && (reg==0xC7204 || reg==0x45444 || reg==0x45440 || reg==0x45404)) {
+        const uint32_t original=value;
+        if(reg==0xC7204 && !(value&1))value|=0x7; // keep power-on, reset and backlight enable
+        display13PanelWriteRecord(reg,original,value,reinterpret_cast<uintptr_t>(__builtin_return_address(0)));
+    }
     // DISPLAY13_COMBO_FRACTION: qualified nominal writer, physical reference,
     // retained controller/manager. No MMIO or other port's PLL inference.
     if(callbackXE->display13FramebufferRequested && callbackXE->xeProfile.display==XELP::Display::XeLPD &&

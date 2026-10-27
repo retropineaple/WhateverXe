@@ -19,6 +19,7 @@ header=(r/'WhateverXe/kern_xe.hpp').read_text()
 extra=header[header.index(' bool display13FBAUXHooksReady'):header.index(' mach_vm_address_t orgDisplay13TrainingPattern')]
 extra=extra.replace(' bool processDisplay13FramebufferAUX(KernelPatcher &,size_t,mach_vm_address_t,size_t);','').replace('mach_vm_address_t','uintptr_t')
 base=base.replace('struct XE {','struct XE {\n'+extra)
+base=base.replace('struct XE {','struct XE {\n bool display13PanelDP=false;static void display13AUXFailRecord(void*,uint32_t,uint32_t){}\n',1)
 code=base+(r/'tests/display13_aux_fixture.cpp').read_text()
 assert 'c.bridge.suspend(io)' in s
 engine=s[s.index('void XE::wrapAlderLakeNEngineDisable('):s.index('void XE::wrapAlderLakeNPowerOverride(')]
