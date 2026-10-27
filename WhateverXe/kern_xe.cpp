@@ -9023,7 +9023,13 @@ IOMemoryDescriptor *XE::wrapAlderLakeNAperture(IOService *fb,int apertureIndex) 
 		auto f=reinterpret_cast<uint8_t *>(fb);
 		base=Display13FBMemory::field<uint32_t>(fb,0x4330);bytes=Display13FBMemory::field<uint32_t>(fb,0x4314);
 		parent=OSDynamicCast(IOMemoryDescriptor,*reinterpret_cast<OSObject **>(static_cast<uint8_t *>(c.controller)+0xC80));
-		if(Display13FBMemory::field<uintptr_t>(fb,0x4348)) {
+		// -wex-adlp-edp boot adoption puts the FB online before native
+		// scanout allocation; an empty range is not-ready, not a fault.
+		if(Display13FBMemory::field<uintptr_t>(fb,0x4348) || (callbackXE->display13PanelDP && !bytes)) {
+			if(!bytes) {
+				uint64_t record[] {2,f[0x1E0],Display13FBMemory::field<uint8_t>(fb,0x4288),base,bytes};
+				adlnPublishMemory("N97FBApertureNotReady",pipe,record,sizeof(record),true);
+			}
 			IOLockUnlock(c.lock);return nullptr;
 		}
 		const auto slot=Display13FBMemory::allocatedSlot(c.controller,fb);
