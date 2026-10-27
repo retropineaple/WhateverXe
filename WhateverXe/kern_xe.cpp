@@ -7125,6 +7125,21 @@ bool XE::processDisplay13PanelTrace(KernelPatcher &patcher,size_t index,mach_vm_
   {online,wrapPanelGetOnlineInfo,orgPanelGetOnlineInfo},{probe,wrapPanelConnectionProbe,orgPanelConnectionProbe}};
  const bool ok=patcher.routeMultipleShort(index,routes,arrsize(routes),address,size);patcher.clearError();
  IORegistryEntry::getRegistryRoot()->setProperty("WEXPanelTraceReady",ok);
+ // IntelFBClientControl::doAttribute forwards AGDC's per-FB online request to
+ // SetFbStatusOnNextProbe, which clears FB0's connected byte when the donor
+ // sees no built-in panel. The panel is the only output here: make the AGDC
+ // request a successful no-op (xor eax,eax) at its single call site.
+ const uint8_t agdcFind[]={0x48,0x8b,0x7d,0xd0,0x48,0x89,0xd6,0xe8,0xd6,0x97,0xfd,0xff};
+ const uint8_t agdcRepl[]={0x48,0x8b,0x7d,0xd0,0x48,0x89,0xd6,0x31,0xc0,0x90,0x90,0x90};
+ bool agdc=false;
+ if(size>0x904E6 && !memcmp(reinterpret_cast<void *>(address+0x904DA),agdcFind,sizeof(agdcFind))) {
+  KernelPatcher::LookupPatch patch {currentFramebuffer,agdcFind,agdcRepl,sizeof(agdcFind),1};
+  patcher.applyLookupPatch(&patch,reinterpret_cast<uint8_t *>(address+0x904DA),sizeof(agdcFind)+1);
+  agdc=patcher.getError()==KernelPatcher::Error::NoError &&
+   !memcmp(reinterpret_cast<void *>(address+0x904DA),agdcRepl,sizeof(agdcRepl));
+  patcher.clearError();
+ }
+ IORegistryEntry::getRegistryRoot()->setProperty("WEXPanelAGDCOnlineIgnored",agdc);
  return ok;
 }
 
