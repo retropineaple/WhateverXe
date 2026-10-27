@@ -29,6 +29,8 @@ void XE::xelpReadFirmware(IOPCIDevice *pci) {
                     auto vbtMap=vbtMemory ? vbtMemory->map(kIOMapReadOnly) : nullptr;
                     if(vbtMap && vbtMap->getVirtualAddress() && vbtMap->getLength()>=region.bytes) {
                         const auto data=reinterpret_cast<const void *>(vbtMap->getVirtualAddress());
+                        // Raw firmware table for diagnosis, published even when admission rejects it.
+                        publishBytes(pci,"WhateverXeVBTRaw",data,region.bytes);
                         firmwarePorts=XELP::VBT::parse(data,region.bytes,xeProfile.family);
                         if(firmwarePorts.valid()){source=2;publishBytes(pci,"TGLVBT",data,firmwarePorts.bytes);}
                     }
@@ -36,6 +38,7 @@ void XE::xelpReadFirmware(IOPCIDevice *pci) {
                     if(vbtMemory)vbtMemory->release();
                 }
                 if(!firmwarePorts.valid()) {
+                    if(!region.address)publishBytes(pci,"WhateverXeVBTRaw",bytes+0x400,region.inlineBytes);
                     const auto embedded=XELP::VBT::parse(bytes+0x400,region.inlineBytes,xeProfile.family);
                     if(embedded.valid()) {
                         firmwarePorts=embedded;source=1;
