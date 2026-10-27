@@ -183,7 +183,8 @@ private:
  bool processDisplay13PanelTrace(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size);
  mach_vm_address_t orgPanelConnectionChanged {},orgPanelGetOnlineInfo {},orgPanelConnectionProbe {};
  static uint32_t wrapPanelConnectionProbe(IOService *fb);
- mach_vm_address_t orgPanelCurrentMode {};
+ mach_vm_address_t orgPanelCurrentMode {},orgPanelSetupTiming {};
+ static void wrapPanelSetupTiming(IOService *fb,const void *timing,void *out);
  static uint32_t wrapPanelCurrentMode(IOService *fb,int *mode,int *depth);
  static uint32_t wrapPanelConnectionChanged(IOService *fb);
  static uint32_t wrapPanelGetOnlineInfo(IOService *fb,void *path,uint8_t *online,uint8_t *info);

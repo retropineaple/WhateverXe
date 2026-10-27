@@ -7147,6 +7147,26 @@ uint32_t XE::wrapPanelCurrentMode(IOService *fb,int *mode,int *depth) {
  if(mode)*mode=chosen;
  return r;
 }
+// setupDisplayTiming fills its output only when the AGDC link validation
+// callback succeeds; otherwise it returns with the caller's uninitialized
+// stack timing, which hwSetMode then programs (garbage scanout) until
+// SetupTimings divides by a zero total. Zero the output first and, if the
+// donor left it empty, program the requested timing unchanged.
+void XE::wrapPanelSetupTiming(IOService *fb,const void *timing,void *out) {
+ constexpr size_t Bytes=0xA0; // hwSetMode copies 0xA0 bytes of this record
+ if(out)bzero(out,Bytes);
+ FunctionCast(wrapPanelSetupTiming,callbackXE->orgPanelSetupTiming)(fb,timing,out);
+ if(!timing || !out)return;
+ auto in=static_cast<const uint8_t *>(timing);auto o=static_cast<uint8_t *>(out);
+ const auto field=[](const uint8_t *p,size_t off){uint32_t v;memcpy(&v,p+off,4);return v;};
+ uint64_t clock=0;memcpy(&clock,in+0x28,8);
+ const bool empty=!field(o,0x40) || !field(o,0x50) || !(field(o,0x40)+field(o,0x44)) || !(field(o,0x50)+field(o,0x54));
+ const bool usable=field(in,0x40) && field(in,0x50) && clock;
+ if(empty && usable)memcpy(out,timing,Bytes);
+ display13PanelTrace(27,(uint64_t(field(in,0x40))<<32)|field(in,0x50),clock,
+  (uint64_t(field(o,0x40))<<32)|field(o,0x50),empty|(uint64_t(empty && usable)<<1),
+  fb && fb->getMetaClass()->getClassSize()>=0x4B90 ? uint32_t(Display13FBMemory::field<int32_t>(fb,0x4250)) : UINT32_MAX);
+}
 bool XE::processDisplay13PanelTrace(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size) {
  const char *changed="__ZN21AppleIntelFramebuffer17connectionChangedEv";
  const char *online="__ZN21AppleIntelFramebuffer13getOnlineInfoEP21AppleIntelDisplayPathPhS2_";
@@ -7164,9 +7184,13 @@ bool XE::processDisplay13PanelTrace(KernelPatcher &patcher,size_t index,mach_vm_
  const uint8_t currentEntry[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0xa8,0,0,0};
  const auto m=patcher.solveSymbol<mach_vm_address_t>(index,current,address,size);patcher.clearError();
  if(m!=address+0x32A88 || memcmp(reinterpret_cast<void *>(m),currentEntry,sizeof(currentEntry)))return false;
+ const char *timingSym="__ZN21AppleIntelFramebuffer18setupDisplayTimingEPK29IODetailedTimingInformationV2PS0_";
+ const uint8_t timingEntry[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x54,0x53,0x48,0x81,0xec,0xb0,0,0,0};
+ const auto t=patcher.solveSymbol<mach_vm_address_t>(index,timingSym,address,size);patcher.clearError();
+ if(t!=address+0x6814C || memcmp(reinterpret_cast<void *>(t),timingEntry,sizeof(timingEntry)))return false;
  KernelPatcher::RouteRequest routes[]={{changed,wrapPanelConnectionChanged,orgPanelConnectionChanged},
   {online,wrapPanelGetOnlineInfo,orgPanelGetOnlineInfo},{probe,wrapPanelConnectionProbe,orgPanelConnectionProbe},
-  {current,wrapPanelCurrentMode,orgPanelCurrentMode}};
+  {current,wrapPanelCurrentMode,orgPanelCurrentMode},{timingSym,wrapPanelSetupTiming,orgPanelSetupTiming}};
  const bool ok=patcher.routeMultipleShort(index,routes,arrsize(routes),address,size);patcher.clearError();
  IORegistryEntry::getRegistryRoot()->setProperty("WEXPanelTraceReady",ok);
  // IntelFBClientControl::doAttribute forwards AGDC's per-FB online request to
