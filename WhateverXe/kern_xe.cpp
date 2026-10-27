@@ -7258,21 +7258,36 @@ uint32_t XE::display13PanelSetBrightness(IOService *fb,uint32_t value) {
  auto path=Display13FBMemory::singlePath<OSObject *>(fb);
  auto port=path && path->getMetaClass()->getClassSize()>=0x3730 ? Display13FBMemory::field<void *>(path,0x3648) : nullptr;
  if(!port)return kIOReturnNotReady;
- // Floor at ~0.8%: DPCD 0 turns the OLED fully dark, unlike a PWM minimum.
- const uint32_t level=value<0x200 ? 0x200 : value>0xFFFF ? 0xFFFF : value;
+ // VESA eDP backlight block 0x720..0x72F. With a two-byte brightness the
+ // level is right-aligned to PWMGEN_BIT_COUNT (0x724), as in drm_edp_backlight:
+ // max = (1 << bits) - 1. A full-range 16-bit value overflows and goes dark.
+ static uint8_t block[16];static uint32_t bits;uint32_t r=0;
+ if(!bits) {
+  r=wrapDisplay13ReadAUX(port,0x720,block,sizeof(block));
+  IORegistryEntry::getRegistryRoot()->setProperty("WEXPanelBacklightDPCD",block,sizeof(block));
+  if(r)return r;
+  uint32_t count=block[4]&0x1F;const uint32_t capMin=block[5]&0x1F,capMax=block[6]&0x1F;
+  if(!count || count>16) {
+   // Unset: select the largest supported count, as Linux does.
+   count=capMax && capMax<=16 ? capMax : 0;
+   if(count && count>=capMin) {uint8_t c=uint8_t(count);r=wrapDisplay13WriteAUX(port,0x724,&c,1);if(r)return r;}
+  }
+  if(!count || count>16)return kIOReturnUnsupported;
+  bits=count;
+ }
+ const uint32_t max=(1U<<bits)-1,floor=max/128 ? max/128 : 1;
+ uint32_t level=uint32_t((uint64_t(value>0xFFFF ? 0xFFFF : value)*max+0x7FFF)/0xFFFF);
+ if(level<floor)level=floor; // DPCD 0 turns the OLED fully dark.
  uint8_t bytes[2]={uint8_t(level>>8),uint8_t(level)};
- auto r=wrapDisplay13WriteAUX(port,0x722,bytes,2);
+ r=wrapDisplay13WriteAUX(port,0x722,bytes,2);
  if(!r && !s->panelBrightnessDPCD) {
-  // Brightness first, then select DPCD control (0x721 bits 1:0 = 2) and
-  // enable the backlight over AUX (0x720 bit 0), as the panel advertises.
-  uint8_t mode=0,control=0;
-  r=wrapDisplay13ReadAUX(port,0x720,&control,1);
-  if(!r)r=wrapDisplay13ReadAUX(port,0x721,&mode,1);
-  if(!r){mode=uint8_t((mode&~3U)|2U);r=wrapDisplay13WriteAUX(port,0x721,&mode,1);}
-  if(!r && !(control&1)){control|=1;r=wrapDisplay13WriteAUX(port,0x720,&control,1);}
+  // Level first, then DPCD control (0x721 bits 1:0 = 2) and AUX enable (0x720 bit 0).
+  uint8_t mode=uint8_t((block[1]&~3U)|2U),control=uint8_t(block[0]|1U);
+  r=wrapDisplay13WriteAUX(port,0x721,&mode,1);
+  if(!r && control!=block[0])r=wrapDisplay13WriteAUX(port,0x720,&control,1);
   if(!r)s->panelBrightnessDPCD=true;
  }
- display13PanelTrace(34,value,level,r,s->panelBrightnessDPCD);
+ display13PanelTrace(34,value,level,r,(uint64_t(bits)<<8)|s->panelBrightnessDPCD);
  return r;
 }
 uint32_t XE::wrapPanelSetAttr(IOService *fb,int connection,uint32_t attribute,uintptr_t value) {

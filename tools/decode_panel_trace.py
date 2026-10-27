@@ -49,7 +49,7 @@ def describe(ev, a, b, c, d, e):
     if ev == 33:
         return "described native mode %#x (donor res %x, call %d)" % (a, b, c)
     if ev == 34:
-        return "bklt %#x -> DPCD %#x res=%x dpcdMode=%d" % (a, b, c, d)
+        return "bklt %#x -> DPCD %#x res=%x bits=%d dpcdMode=%d" % (a, b, c, d >> 8, d & 1)
     if ev == 4:
         return "ddi=%d res=%x mode=%d conn=%d %s" % (a, b, c, d, link(e))
     if ev == 11:
