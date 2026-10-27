@@ -7070,7 +7070,10 @@ static void display13PanelLiveState() {
  Display13FBSSTIO io{c.map};
  static const uint32_t regs[]={0x70180,0x70188,0x7018C,0x70190,0x7019C,0x701A4,0x701AC,0x70008,0x70040,0x60400,
   0x60540,0x60544,0x64000,0x46140,0x164280,0x46010,0x46014,0x16428C,0x164290,0x44400,0x44404,0x4440C,
-  0x44200,0x44204,0x4420C,0xC4000,0x6001C,0x60030,0x60040,0x42084,0x70028,0x45404};
+  0x44200,0x44204,0x4420C,0xC4000,0x6001C,0x60030,0x60040,0x42084,0x70028,0x45404,
+  // DBUF slices, pipe A scalers 1/2 (win pos/size/ctl), DE_PIPE_IIR(A) underrun,
+  // plane/cursor DDB and WM_LINETIME.
+  0x45008,0x44FE8,0x68170,0x68174,0x68180,0x68270,0x68274,0x68280,0x44408,0x7027C,0x7017C,0x45270};
  uint64_t r[2+arrsize(regs)] {1,mach_absolute_time()};
  for(unsigned i=0;i<arrsize(regs);++i)r[2+i]=(uint64_t(regs[i])<<32)|io.read(regs[i]);
  static bool first;
@@ -7206,6 +7209,10 @@ uint32_t XE::wrapPanelInterruptState(void *controller,void *ref,uint32_t state,I
   else if(display13PendingVBL.ref==ref)display13PendingVBL.pending=false;
   display13PanelTrace(31,state,r,paths,controller ? Display13FBMemory::field<uint32_t>(controller,0xE14) : UINT32_MAX,
    uint64_t(display13PendingVBL.pending));
+  // Steady-state register sample (at most once a second, thread context only).
+  static uint64_t lastSample;const auto now=mach_absolute_time();uint64_t ns=0;
+  absolutetime_to_nanoseconds(now-lastSample,&ns);
+  if(!ml_at_interrupt_context() && ns>=1000000000ULL){lastSample=now;display13PanelLiveState();}
  }
  return r;
 }
