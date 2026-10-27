@@ -4,7 +4,7 @@ import re, struct, sys
 
 NAMES = {1: "attr", 4: "probe", 5: "AUXFAIL", 6: "enablePort", 7: "disablePort", 8: "trainPat",
          9: "clkOn", 10: "clkOff", 11: "DDC", 20: "connChg>", 21: "connChg<", 22: "online>",
-         23: "online<", 24: "connProbe", 25: "curMode", 26: "linkBW", 27: "setupTim", 28: "rateSel", 30: "bootAdopt"}
+         23: "online<", 24: "connProbe", 25: "curMode", 26: "linkBW", 27: "setupTim", 28: "rateSel", 29: "rateCap", 30: "bootAdopt"}
 ALL = (1 << 64) - 1
 
 
@@ -40,6 +40,8 @@ def describe(ev, a, b, c, d, e):
         return "req=%dx%d pclk=%d out=%dx%d empty=%d fallback=%d curMode=%x" % (a >> 32, a & 0xffffffff, b, c >> 32, c & 0xffffffff, d & 1, (d >> 1) & 1, e)
     if ev == 28:
         return "LINK_BW_SET %#x -> LINK_RATE_SET index %d (res=%x) lanes=%#x" % (a, b, c, d)
+    if ev == 29:
+        return "DPCD %#x max rate %#x -> %#x" % (a, b, c)
     if ev == 4:
         return "ddi=%d res=%x mode=%d conn=%d %s" % (a, b, c, d, link(e))
     if ev == 11:
@@ -71,6 +73,17 @@ def main():
         if "-v" not in sys.argv and ev == 1 and noise.search(line):
             continue
         print("%8.3f %-11s %s" % ((tm - t0) / 1e9, NAMES.get(ev, str(ev)), line))
+    live(text)
+
+
+def live(text):
+    for key in ("WEXPanelLiveFirst", "WEXPanelLiveLast"):
+        m = re.search(r'"%s" = <([0-9a-f]*)>' % key, text)
+        if not m:
+            continue
+        raw = bytes.fromhex(m.group(1))
+        q = struct.unpack("<%dQ" % (len(raw) // 8), raw)
+        print(key, " ".join("%x=%08x" % (v >> 32, v & 0xffffffff) for v in q[2:]))
 
 
 if __name__ == "__main__":

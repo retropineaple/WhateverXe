@@ -6373,6 +6373,7 @@ IOReturn XE::wrapAlderLakeNDSBSetup(IOService *controller) {return adlnSetupAuxi
 
 static uint64_t display13FBState(IOService *fb);
 static uint64_t display13LinkState();
+static void display13PanelLiveState();
 bool XE::processDisplay13FramebufferTopology(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size) {
 	const char *os="__ZN31AppleIntelFramebufferController16getOSInformationEv";
 	const char *state="__ZN14AppleIntelPort14probePortStateEv";
@@ -7062,6 +7063,22 @@ static uint64_t display13FBState(IOService *fb) {
   (uint64_t(Display13FBMemory::field<uint8_t>(fb,0x1E2))<<24) | (uint64_t(Display13FBMemory::field<uint8_t>(fb,0x1E4))<<32) |
   (uint64_t(Display13FBMemory::field<uint8_t>(fb,0x1E6))<<40) | (uint64_t(Display13FBMemory::field<uint16_t>(fb,0x44E0))<<48);
 }
+// -wex-adlp-edp: live plane/pipe/link/IRQ state of pipe A and DDI A, kept as
+// first-after-modeset and latest snapshots (read-only MMIO).
+static void display13PanelLiveState() {
+ auto &c=display13FBPower;if(!c.map || !c.map->getVirtualAddress())return;
+ Display13FBSSTIO io{c.map};
+ static const uint32_t regs[]={0x70180,0x70188,0x7018C,0x70190,0x7019C,0x701A4,0x701AC,0x70008,0x70040,0x60400,
+  0x60540,0x60544,0x64000,0x46140,0x164280,0x46010,0x46014,0x16428C,0x164290,0x44400,0x44404,0x4440C,
+  0x44200,0x44204,0x4420C,0xC4000,0x6001C,0x60030,0x60040,0x42084,0x70028,0x45404};
+ uint64_t r[2+arrsize(regs)] {1,mach_absolute_time()};
+ for(unsigned i=0;i<arrsize(regs);++i)r[2+i]=(uint64_t(regs[i])<<32)|io.read(regs[i]);
+ static bool first;
+ const bool modeset=!(io.read(0x60400)&0x80000000U) || (io.read(0x64000)&0xEU)!=0x6U;
+ auto root=IORegistryEntry::getRegistryRoot();
+ if(modeset && !first){first=true;root->setProperty("WEXPanelLiveFirst",r,sizeof(r));}
+ root->setProperty("WEXPanelLiveLast",r,sizeof(r));
+}
 static uint64_t display13LinkState() {
  auto &c=display13FBPower;if(!c.map || !c.map->getVirtualAddress())return UINT64_MAX;
  Display13FBSSTIO io{c.map};
@@ -7222,11 +7239,14 @@ uint32_t XE::wrapDisplay13ReadAUX(void *port,uint32_t address,void *data,uint32_
  // AGDP derives link bandwidth from 0x100 and then rejects every mode.
  // Report the rate the adopted link actually runs at (HBR here).
  // Train the firmware-proven 4 x HBR configuration: cap MAX_LINK_RATE.
- if(!r && complete && callbackXE->display13PanelDP && data && length && address<=0x001 && address+length>0x001 &&
-    Display13FBMemory::field<uint32_t>(port,0x120)==0) {
-  auto &max=static_cast<uint8_t *>(data)[0x001-address];
-  if(max>0x0A)max=0x0A;
- }
+ // DPCD 1.4 sinks repeat the receiver capabilities at 0x2200 (0x00E bit 7).
+ static const uint32_t capRates[]={0x001U,0x2201U};
+ for(uint32_t at:capRates)
+  if(!r && complete && callbackXE->display13PanelDP && data && length && address<=at && address+length>at &&
+     Display13FBMemory::field<uint32_t>(port,0x120)==0) {
+   auto &max=static_cast<uint8_t *>(data)[at-address];
+   if(max>0x0A){display13PanelTrace(29,at,max,0x0A);max=0x0A;}
+  }
  if(!r && complete && callbackXE->display13PanelDP && data && length && address<=0x100 && address+length>0x100 &&
     Display13FBMemory::field<uint32_t>(port,0x120)==0) {
   auto &bw=static_cast<uint8_t *>(data)[0x100-address];
@@ -8162,6 +8182,7 @@ uint32_t XE::wrapAlderLakeNConnectionAttr(IOService *fb,int connection,uint32_t 
     r[5]=result;r[6]=!result && value ? *value : 0;adlnFrontendSnapshot(fb,r);adlnPublishFrontend("Attr","Last",r);
     if(attribute=='enab' || attribute=='cena' || attribute=='chng' || attribute=='flgs')
         display13PanelTrace(1,r[2],attribute,result,r[6],display13FBState(fb));
+    if(callbackXE->display13PanelDP && r[2]==0)display13PanelLiveState();
     if(attribute=='cena' || attribute=='enab' || attribute=='flgs') {
         char key[64];snprintf(key,sizeof(key),"N97FBAttr%u_%08x",static_cast<uint32_t>(r[2]),attribute);
         IORegistryEntry::getRegistryRoot()->setProperty(key,r,sizeof(r));
