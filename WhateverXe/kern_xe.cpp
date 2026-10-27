@@ -9411,7 +9411,11 @@ void XE::adlnWMSetup(OSObject *plane,OSObject *path,bool cursor) {
 		const auto ctl=Display13FBMemory::field<uint32_t>(plane,0x100),ipc=powered ? io.read(0x45004) : UINT32_MAX;
 		const auto cursorMode=powered && cursor ? io.read(0x70080+bank) : 0;
 		const bool rgbSupported=Display13WM::supportedRGBControl(ctl);
-		const bool yTiled=!cursor && ((ctl>>10)&7)==4;
+		// -wex-adlp-edp: the pending control can still describe the adopted
+		// linear GOP while the native modeset scans out Y-tiled (YTiling is
+		// forced at controller start). Y-tiled levels (four-line minimum) are
+		// a conservative superset for a linear primary, never an underrun.
+		const bool yTiled=!cursor && (((ctl>>10)&7)==4 || (callbackXE->display13PanelDP && ((ctl>>10)&7)==0));
 		const uint32_t width=cursor ? Display13FBMemory::field<uint32_t>(fb,0x4278) : (Display13FBMemory::field<uint32_t>(plane,0x11C)&0x1FFF)+1;
 		const auto htotal=(Display13FBMemory::field<uint16_t>(path,0x13A)&0x3FFF)+1;
 		inputs[14]=wells;inputs[15]=rangeRaw;inputs[16]=ctl;inputs[17]=ipc;inputs[18]=cursorMode;
