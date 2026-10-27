@@ -186,6 +186,8 @@ private:
  mach_vm_address_t orgPanelCurrentMode {},orgPanelSetupTiming {},orgPanelInterruptState {};
  static uint32_t wrapPanelInterruptState(void *controller,void *ref,uint32_t state,IOService *fb);
  static void display13ReplayVBL();
+ mach_vm_address_t orgPanelValidateMode {},panelProgrammedMode {};
+ static uint32_t wrapPanelValidateMode(IOService *fb,int mode,const void **desc,const void **timing);
  static void wrapPanelSetupTiming(IOService *fb,const void *timing,void *out);
  static uint32_t wrapPanelCurrentMode(IOService *fb,int *mode,int *depth);
  static uint32_t wrapPanelConnectionChanged(IOService *fb);

@@ -7216,6 +7216,36 @@ void XE::display13ReplayVBL() {
  const auto r=reinterpret_cast<uint32_t (*)(void *,void *,uint32_t,IOService *)>(display13OrgInterruptState)(p.controller,p.ref,p.state,p.fb);
  display13PanelTrace(32,p.state,r,display13FBPathCount(p.fb),Display13FBMemory::field<uint32_t>(p.controller,0xE14));
 }
+// Before CoreDisplay installs the EDID timings, the donor cannot describe
+// any mode, so IOAccelDisplayPipe::init_framebuffer_resource fails for FB0
+// and every later display pipe transaction is rejected. Describe the
+// panel's native EDID mode (the timing the firmware left running) as the
+// first detailed timing while FB0 has no list, like a real boot mode.
+static uint8_t display13NativeTiming[0xA0];
+static void display13BuildNativeTiming() {
+ auto t=display13NativeTiming;bzero(t,sizeof(display13NativeTiming));
+ const auto put32=[t](size_t off,uint32_t v){memcpy(t+off,&v,4);};
+ const auto put64=[t](size_t off,uint64_t v){memcpy(t+off,&v,8);};
+ const auto put16=[t](size_t off,uint16_t v){memcpy(t+off,&v,2);};
+ put32(0x00,0x80001000);                       // detailed-timing mode ID
+ put64(0x28,329630000ULL);put64(0x30,329630000ULL);put64(0x38,329630000ULL);
+ put32(0x40,2880);put32(0x44,80);put32(0x48,8);put32(0x4C,32);   // EDID DTD 1
+ put32(0x50,1800);put32(0x54,56);put32(0x58,6);put32(0x5C,8);
+ put32(0x80,1);                                 // one link
+ put16(0x88,1);put16(0x8A,2);put16(0x8C,1);put16(0x8E,1); // RGB444, 8 bpc, sRGB, full
+}
+uint32_t XE::wrapPanelValidateMode(IOService *fb,int mode,const void **desc,const void **timing) {
+ const auto r=FunctionCast(wrapPanelValidateMode,callbackXE->orgPanelValidateMode)(fb,mode,desc,timing);
+ if(!r || mode!=int(0x80001000) || !fb || fb->getMetaClass()->getClassSize()<0x4B90 ||
+    Display13FBMemory::field<uint32_t>(fb,0x1DC)!=0 || !Display13FBMemory::field<uint8_t>(fb,0x1E0))return r;
+ auto list=OSDynamicCast(OSArray,Display13FBMemory::field<OSObject *>(fb,0x4260));
+ if(list && list->getCount())return r;
+ static bool built;if(!built){display13BuildNativeTiming();built=true;}
+ if(desc)*desc=reinterpret_cast<const void *>(callbackXE->panelProgrammedMode);
+ if(timing)*timing=display13NativeTiming;
+ static uint32_t count;if(++count<=4)display13PanelTrace(33,uint32_t(mode),r,count);
+ return 0;
+}
 bool XE::processDisplay13PanelTrace(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size) {
  const char *changed="__ZN21AppleIntelFramebuffer17connectionChangedEv";
  const char *online="__ZN21AppleIntelFramebuffer13getOnlineInfoEP21AppleIntelDisplayPathPhS2_";
@@ -7241,10 +7271,16 @@ bool XE::processDisplay13PanelTrace(KernelPatcher &patcher,size_t index,mach_vm_
  const uint8_t irqEntry[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x38};
  const auto q=patcher.solveSymbol<mach_vm_address_t>(index,irqSym,address,size);patcher.clearError();
  if(q!=address+0x7229A || memcmp(reinterpret_cast<void *>(q),irqEntry,sizeof(irqEntry)))return false;
+ const char *validSym="__ZN21AppleIntelFramebuffer19validateDisplayModeEiPPKNS_15ModeDescriptionEPPK29IODetailedTimingInformationV2";
+ const uint8_t validEntry[]={0x55,0x48,0x89,0xe5,0x41,0x56,0x53};
+ const auto v=patcher.solveSymbol<mach_vm_address_t>(index,validSym,address,size);patcher.clearError();
+ const auto pm=patcher.solveSymbol<mach_vm_address_t>(index,"__ZL14programmedMode",address,size);patcher.clearError();
+ if(v!=address+0x30DE2 || pm!=address+0x98670 || memcmp(reinterpret_cast<void *>(v),validEntry,sizeof(validEntry)))return false;
+ panelProgrammedMode=pm;
  KernelPatcher::RouteRequest routes[]={{changed,wrapPanelConnectionChanged,orgPanelConnectionChanged},
   {online,wrapPanelGetOnlineInfo,orgPanelGetOnlineInfo},{probe,wrapPanelConnectionProbe,orgPanelConnectionProbe},
   {current,wrapPanelCurrentMode,orgPanelCurrentMode},{timingSym,wrapPanelSetupTiming,orgPanelSetupTiming},
-  {irqSym,wrapPanelInterruptState,orgPanelInterruptState}};
+  {irqSym,wrapPanelInterruptState,orgPanelInterruptState},{validSym,wrapPanelValidateMode,orgPanelValidateMode}};
  const bool ok=patcher.routeMultipleShort(index,routes,arrsize(routes),address,size);patcher.clearError();
  IORegistryEntry::getRegistryRoot()->setProperty("WEXPanelTraceReady",ok);
  display13OrgInterruptState=ok ? orgPanelInterruptState : 0;
