@@ -9432,7 +9432,10 @@ void XE::adlnWMSetup(OSObject *plane,OSObject *path,bool cursor) {
 		inputs[19]=width;inputs[20]=htotal;inputs[21]=rgbSupported;inputs[22]=powered;
 		inputs[23]=Display13FBMemory::field<uint32_t>(plane,0x10C);
 		if(powered && rangeRaw!=UINT32_MAX && Display13DBUF::valid(range) && rgbSupported && ipc!=UINT32_MAX &&
-			(!cursor || Display13WM::cursorMatches(cursorMode,width,true)) &&
+			// -wex-adlp-edp: on a cursor resize (HiDPI scaled modes) CUR_CTL still
+			// holds the previous size until native programs it after this plan.
+			(!cursor || Display13WM::cursorMatches(cursorMode,width,true) ||
+			 (callbackXE->display13PanelDP && Display13WM::cursorMatches(0,width,true))) &&
 			!(Display13DBUF::slices(range)&~Display13DBUF::allowed(c.dbuf,pipe)) &&
 			(cursor || !Display13DBUF::overlap(range,c.dbuf.pipe[pipe].cursor))) {
 			// Audited native pixel/scaling calculation is CPU-only. Preserve its
