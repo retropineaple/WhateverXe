@@ -7087,6 +7087,27 @@ uint32_t XE::wrapPanelGetOnlineInfo(IOService *fb,void *path,uint8_t *online,uin
  display13PanelTrace(23,display13FBState(fb),online?*online:0xFF,r,port,display13LinkState());
  return r;
 }
+// AppleIntelFramebuffer::connectionProbe treats FB0 as the built-in panel and
+// clears its connected byte (+1E1) for clamshell/external-display policy. In
+// -wex-adlp-edp the panel itself is the only output, so a clear on a live,
+// online FB0 with Combo A transmitting would blank the only display.
+uint32_t XE::wrapPanelConnectionProbe(IOService *fb) {
+ const bool sized=fb && fb->getMetaClass()->getClassSize()>=0x4B90;
+ const auto before=sized ? Display13FBMemory::field<uint8_t>(fb,0x1E1) : 0;
+ const auto r=FunctionCast(wrapPanelConnectionProbe,callbackXE->orgPanelConnectionProbe)(fb);
+ if(!sized)return r;
+ const auto after=Display13FBMemory::field<uint8_t>(fb,0x1E1);
+ auto controller=Display13FBMemory::field<uint8_t *>(fb,0x1D0);
+ uint64_t policy=UINT64_MAX;
+ if(controller)policy=uint64_t(Display13FBMemory::field<uint32_t>(controller,0xD5C)&0xFF)|
+  (uint64_t(controller[0xE54])<<8)|(uint64_t(controller[0xE55])<<16)|(uint64_t(controller[0xE56])<<24);
+ const auto link=display13LinkState();
+ const bool restore=before && !after && Display13FBMemory::field<uint32_t>(fb,0x1DC)==0 &&
+  Display13FBMemory::field<uint8_t>(fb,0x1E0) && link!=UINT64_MAX && (link&0x80000000U) && ((link>>32)&0x80000000U);
+ if(restore)*reinterpret_cast<uint8_t *>(reinterpret_cast<uint8_t *>(fb)+0x1E1)=1;
+ if(before!=after || restore)display13PanelTrace(24,display13FBState(fb),before|(uint64_t(after)<<8)|(uint64_t(restore)<<16),r,policy,link);
+ return r;
+}
 bool XE::processDisplay13PanelTrace(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size) {
  const char *changed="__ZN21AppleIntelFramebuffer17connectionChangedEv";
  const char *online="__ZN21AppleIntelFramebuffer13getOnlineInfoEP21AppleIntelDisplayPathPhS2_";
@@ -7096,8 +7117,12 @@ bool XE::processDisplay13PanelTrace(KernelPatcher &patcher,size_t index,mach_vm_
  const auto o=patcher.solveSymbol<mach_vm_address_t>(index,online,address,size);patcher.clearError();
  if(c!=address+0x2E0E6 || o!=address+0x2E232 || memcmp(reinterpret_cast<void *>(c),changedEntry,sizeof(changedEntry)) ||
     memcmp(reinterpret_cast<void *>(o),onlineEntry,sizeof(onlineEntry)))return false;
+ const char *probe="__ZN21AppleIntelFramebuffer15connectionProbeEv";
+ const uint8_t probeEntry[]={0x55,0x48,0x89,0xe5,0x41,0x56,0x53,0x48,0x83,0xec,0x10};
+ const auto p=patcher.solveSymbol<mach_vm_address_t>(index,probe,address,size);patcher.clearError();
+ if(p!=address+0x2DDF0 || memcmp(reinterpret_cast<void *>(p),probeEntry,sizeof(probeEntry)))return false;
  KernelPatcher::RouteRequest routes[]={{changed,wrapPanelConnectionChanged,orgPanelConnectionChanged},
-  {online,wrapPanelGetOnlineInfo,orgPanelGetOnlineInfo}};
+  {online,wrapPanelGetOnlineInfo,orgPanelGetOnlineInfo},{probe,wrapPanelConnectionProbe,orgPanelConnectionProbe}};
  const bool ok=patcher.routeMultipleShort(index,routes,arrsize(routes),address,size);patcher.clearError();
  IORegistryEntry::getRegistryRoot()->setProperty("WEXPanelTraceReady",ok);
  return ok;

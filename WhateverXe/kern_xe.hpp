@@ -181,7 +181,8 @@ private:
  // -wex-adlp-edp time-ordered display trace.
  static void display13PanelTrace(uint32_t event,uint64_t a=0,uint64_t b=0,uint64_t c=0,uint64_t d=0,uint64_t e=0);
  bool processDisplay13PanelTrace(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size);
- mach_vm_address_t orgPanelConnectionChanged {},orgPanelGetOnlineInfo {};
+ mach_vm_address_t orgPanelConnectionChanged {},orgPanelGetOnlineInfo {},orgPanelConnectionProbe {};
+ static uint32_t wrapPanelConnectionProbe(IOService *fb);
  static uint32_t wrapPanelConnectionChanged(IOService *fb);
  static uint32_t wrapPanelGetOnlineInfo(IOService *fb,void *path,uint8_t *online,uint8_t *info);
  static bool display13HDMIPort(void *port);
