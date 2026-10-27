@@ -7246,7 +7246,7 @@ bool XE::processDisplay13FramebufferSST(KernelPatcher &patcher,size_t index,mach
 
 // Called with the display owner lock held. The native caller owns the port;
 // require its retained platform record and BAR association before sampling it.
-uint8_t *XE::display13SSTPort(void *port) {
+uint8_t *XE::display13SSTPort(void *port,bool unprobed) {
  auto s=callbackXE;auto &c=display13FBPower;auto object=static_cast<OSObject *>(port);
  if(!s->display13FramebufferRequested || s->xeProfile.display!=XELP::Display::XeLPD || !s->display13FBSSTHooksReady ||
     !object || object->getMetaClass()->getClassSize()<0x624 || !c.controller ||
@@ -7255,7 +7255,11 @@ uint8_t *XE::display13SSTPort(void *port) {
  auto p=static_cast<uint8_t *>(port);auto config=Display13FBMemory::field<uint32_t *>(p,0x548);
  if(!Display13FBTopology::selected(s->adlnPlatform,config,s->adlnOutputWiring) ||
     !(s->adlnOutputWiring.dp&(1U<<config[0])) || p[0x117] ||
-    Display13FBMemory::field<uint32_t>(p,0x120)!=config[0] || Display13FBMemory::field<uint32_t>(p,0x550)!=(config[0]>=3?4U:1U) ||
+    Display13FBMemory::field<uint32_t>(p,0x120)!=config[0] ||
+    // Boot adoption runs before the first probePortMode; a Combo port is then
+    // still mode 0. Every AUX/training user requires the probed mode.
+    (Display13FBMemory::field<uint32_t>(p,0x550)!=(config[0]>=3?4U:1U) &&
+     !(unprobed && config[0]<3 && !Display13FBMemory::field<uint32_t>(p,0x550))) ||
     Display13FBMemory::field<void *>(p,0x578)!=c.access)return nullptr;
  return p;
 }
@@ -8159,8 +8163,9 @@ void XE::wrapAlderLakeNSetupWorkLoop(IOService *controller,IOWorkLoop *workLoop)
                 const auto ddi=c.bridge.bootPort;
                 const bool dp=ddi<7 && (callbackXE->adlnOutputWiring.dp&(1U<<ddi));
                 bool linked=!dp;
-                if(dp && !display13SSTPort(port))display13SSTPortRecord(port);
-                if(dp && display13SSTPort(port)) {
+                const bool comboBoot=ddi<2;
+                if(dp && !display13SSTPort(port,comboBoot))display13SSTPortRecord(port);
+                if(dp && display13SSTPort(port,comboBoot)) {
                     Display13FBBootIO io{c.map};const auto boot=AlderLakeN::readDisplay(io,true);
                     if(ddi>=3) {
                         const auto source=Display13TC::Boot::capture(io,true,ddi,0);

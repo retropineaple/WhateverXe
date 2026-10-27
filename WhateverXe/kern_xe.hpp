@@ -174,7 +174,7 @@ private:
  static bool display13StopTranscoder(void *port);
  static bool display13DeferClock(void *access,uint64_t reg,uint32_t value,uintptr_t caller);
 
- static uint8_t *display13SSTPort(void *port);
+ static uint8_t *display13SSTPort(void *port,bool unprobed=false);
  static void display13SSTPortRecord(void *port);
  static bool display13HDMIPort(void *port);
  static uint32_t wrapDisplay13TrainingPattern(void *path,uint32_t pattern);
