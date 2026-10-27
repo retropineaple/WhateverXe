@@ -9491,6 +9491,16 @@ void XE::adlnWMSetup(OSObject *plane,OSObject *path,bool cursor) {
 void XE::wrapAlderLakeNPlaneWMSetup(OSObject *plane,OSObject *path) {adlnWMSetup(plane,path,false);}
 void XE::wrapDisplay13CursorWMSetup(OSObject *plane,OSObject *path) {adlnWMSetup(plane,path,true);}
 
+// -wex-adlp-edp: WM_LINETIME and the frame period follow the pipe's own pixel
+// clock (native base at path+0x118, doubled per fb+0x425c), not the rate that
+// adjustPixelClockForWatermarks raises by the pipe-scaler downscale ratio (i915).
+static uint64_t display13LineTimePixel(IOService *fb,OSObject *path,uint64_t adjusted) {
+	if(!callbackXE->display13PanelDP || !fb || !path || fb->getMetaClass()->getClassSize()<0x4B90 ||
+	   path->getMetaClass()->getClassSize()<0x3730)return adjusted;
+	auto base=Display13FBMemory::field<uint64_t>(path,0x118);
+	if(Display13FBMemory::field<uint8_t>(fb,0x425c))base*=2;
+	return base && base<=adjusted ? base : adjusted;
+}
 void XE::wrapAlderLakeNPipeWMSetup(IOService *controller,IOService *fb,OSObject *path,void *params) {
 	auto &c=display13FBPower;if(!c.lock)return;
 	uint64_t record[8] {};IOLockLock(c.lock);
@@ -9513,7 +9523,7 @@ void XE::wrapAlderLakeNPipeWMSetup(IOService *controller,IOService *fb,OSObject 
 		auto crtc=params ? params : reinterpret_cast<uint8_t *>(path)+0x128;
 		const auto htotal=((Display13FBMemory::field<uint32_t>(crtc,0x10)>>16)&0x3FFF)+1;
 		auto adjust=reinterpret_cast<uint64_t (*)(void *,void *,void *,bool,void *)>(callbackXE->adlnAdjustPixelClock);
-		const auto pixel=adjust(controller,fb,path,true,crtc);
+		const auto pixel=display13LineTimePixel(fb,path,adjust(controller,fb,path,true,crtc));
 		const auto value=Display13WM::pipeLineTime(htotal,pixel);
 		*reinterpret_cast<uint32_t *>(static_cast<uint8_t *>(crtc)+0x84)=value;
 		if(!value)adlnFault(c.watermarkFaulted,__LINE__);
@@ -9712,7 +9722,7 @@ Display13WM::Latch XE::adlnVerifyWMLatch(IOService *fb,uint64_t nativeHz,uint64_
 		void delayUs(unsigned us) {IOSleep(us/1000);}
 	} io {c.map};
 	auto adjust=reinterpret_cast<uint64_t (*)(void *,void *,void *,bool,void *)>(callbackXE->adlnAdjustPixelClock);
-	const auto pipePixel=adjust(c.controller,fb,path,true,nullptr);
+	const auto pipePixel=display13LineTimePixel(fb,path,adjust(c.controller,fb,path,true,nullptr));
     const auto primaryRaw=Display13DBUF::hardwareRaw(c.dbuf,pipe,c.dbuf.pipe[pipe].primary);
     const auto cursorRaw=Display13DBUF::hardwareRaw(c.dbuf,pipe,c.dbuf.pipe[pipe].cursor);
     if(primaryRaw==UINT32_MAX || cursorRaw==UINT32_MAX) {result.status=Display13WM::Status::Input;return result;}
