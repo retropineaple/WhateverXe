@@ -9039,7 +9039,7 @@ IOMemoryDescriptor *XE::wrapAlderLakeNAperture(IOService *fb,int apertureIndex) 
 			backing=adlnInspectSysMem(static_cast<IOService *>(c.controller),fb,slot,layout).status==Display13FBSysMem::Status::Complete;
 		}
 		if(!parent || !backing ||
-			!Display13FBMemory::apertureRange(c.pipe[pipe].memory.pool,base,bytes,parent->getLength()))parent=nullptr;
+			!Display13FBMemory::apertureRange(c.pipe[pipe].memory.pool,base,(bytes+4095)&~4095U,parent->getLength()))parent=nullptr;
 		if(parent)parent->retain();else {
 			uint64_t record[] {1,f[0x1E0],Display13FBMemory::field<uint8_t>(fb,0x4288),Display13FBMemory::field<uint32_t>(c.controller,0xDF0),base,bytes,
 				backing,c.pipe[pipe].memory.pool.state,c.pipe[pipe].memory.pool.pages};
