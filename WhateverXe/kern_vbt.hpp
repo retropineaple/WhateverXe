@@ -27,6 +27,9 @@ struct Port {
 struct Ports {
     Status status {Status::Missing};
     uint32_t version {},bytes {},present {},unmapped {},ambiguous {};
+    // Later children for an already-described DDI, ignored like Linux
+    // parse_ddi_ports ("using the first") when the caller opts in.
+    uint32_t duplicates {};
     uint32_t checksum {};
     struct Panel {
         bool valid {},lowSwing {},hobl {};
@@ -88,7 +91,7 @@ struct Ports {
 };
 // Optional panel facts must never weaken General Definitions admission or
 // make an unrelated malformed firmware tail reject usable connector facts.
-inline void panelFacts(const uint8_t *b,size_t header,size_t size,Ports &ports) {
+inline void panelFacts(const uint8_t *b,size_t header,size_t size,Ports &ports,bool preferA=false) {
     const uint8_t *options=nullptr,*edp=nullptr,*power=nullptr,*backlight=nullptr;
     size_t optionsSize=0,edpSize=0,powerSize=0,backlightSize=0;
     bool duplicate=false,backlightDuplicate=false;
@@ -110,8 +113,13 @@ inline void panelFacts(const uint8_t *b,size_t header,size_t size,Ports &ports) 
     if(duplicate || !options || optionsSize<1 || options[0]>=16 ||
        !edp || edpSize<212 || (ports.version>=232 && (!power || powerSize<56)))return;
     unsigned internal=PortCount;
+    // Shared multi-SKU VBTs can describe internal DP on both Combo A and B.
+    // With preferA, DDI A is the panel; the caller must still prove the live
+    // firmware route before using it.
+    const bool aPanel=preferA && (ports.present&1) && ports.port[0].internal() && ports.port[0].dp();
     for(unsigned d=0;d<PortCount;++d)if((ports.present&(1U<<d)) &&
         ports.port[d].internal() && ports.port[d].dp()) {
+        if(aPanel){internal=0;break;}
         if(internal!=PortCount)return; // no guessed panel/connector association
         internal=d;
     }
@@ -144,7 +152,7 @@ inline uint32_t ddi(Family family,uint32_t dvo) {
     }
     return PortCount;
 }
-inline Ports parse(const void *data,size_t length,Family family) {
+inline Ports parse(const void *data,size_t length,Family family,bool firstWins=false) {
     Ports r;
     if(!data || !length)return r;
     if(displayAdapter(family)==DisplayAdapter::Unknown){r.status=Status::Platform;return r;}
@@ -187,12 +195,15 @@ inline Ports parse(const void *data,size_t length,Family family) {
         if(!(type&2))continue;
         const auto d=ddi(family,c[16]);
         if(d==PortCount){++r.unmapped;continue;}
-        if(r.present&(1U<<d)){r.status=Status::Conflict;return r;}
+        if(r.present&(1U<<d)) {
+            if(!firstWins){r.status=Status::Conflict;return r;}
+            ++r.duplicates;continue;
+        }
         auto &q=r.port[d];q.type=type;q.dvo=c[16];q.ddc=c[19];q.aux=c[25];q.flags=c[23];q.capabilities=c[33];q.hdmiPreset=c[7]&31;
         r.present|=1U<<d;
         if(!q.fixedTMDS())r.ambiguous|=1U<<d;
     }
-    r.status=Status::Valid;panelFacts(b,bh,bs,r);return r;
+    r.status=Status::Valid;panelFacts(b,bh,bs,r,firstWins);return r;
 }
 // OpRegion acquisition descriptor, kept pure for malformed/overflow testing.
 struct Region {uint64_t address {};uint32_t bytes {},inlineBytes {};bool valid {};};

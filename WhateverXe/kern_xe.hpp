@@ -121,6 +121,11 @@ private:
     XELP::SmallGTResources display12SmallGT;
     XELP::Profile xeProfile;
     XELP::VBT::Ports firmwarePorts;
+    // -wex-adlp-edp: experimental ADL-P/U internal panel on Combo A, driven
+    // through the fixed Combo DP SST backend. Off by default.
+    bool display13PanelDP {};
+    uint32_t display13ComboDP() const {return display13PanelDP ? 1U : 0U;}
+    bool display13ComboDPReady {};
     void xelpReadFirmware(IOPCIDevice *pci);
     void xelpLoadDisplayPool(IOService *provider);
     bool xelpInstallHostRPS(KernelPatcher &,size_t,mach_vm_address_t,size_t);

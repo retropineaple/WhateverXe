@@ -138,6 +138,7 @@
   "-wex-display-trace": [],
   "-wex-adlp-readout": [],
   "-wex-adlp-readout-noaux": [],
+  "-wex-adlp-edp": [],
   "-wex-adlp-load-only": [],
   "-wex-display13-offline": []
 }

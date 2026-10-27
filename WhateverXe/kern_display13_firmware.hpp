@@ -35,6 +35,17 @@ namespace XELP { namespace VBT {
         }
         return w;
     }
+    // Experimental: an internal DP panel the VBT places on Combo A with AUX A.
+    // Linux treats this as eDP; the caller drives it as a fixed Combo DP sink
+    // and must separately prove the firmware-lit route before admission.
+    inline uint32_t display13PanelDP(const Ports &ports) {
+        const auto &p=ports.port[0];
+        if(!ports.valid() || !ports.panel.valid || ports.panel.ddi!=0 || !(ports.present&1) ||
+           !p.internal() || !p.dp() || (p.type&(0x400|0x20|1)) || p.aux!=0x40)return 0;
+        for(unsigned other=1;other<PortCount;++other)if((ports.present&(1U<<other)) &&
+            ports.port[other].dp() && ports.port[other].aux==0x40)return 0;
+        return 1;
+    }
 
 } }
 #endif

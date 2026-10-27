@@ -3849,7 +3849,12 @@ Display13OutputWiring XE::display13BoardWiring(IOService *provider) {
     if(!xeProfile.displayAdmitted() || xeProfile.display!=XELP::Display::XeLPD)return {};
     // Display13 physical capacity is shared by ADL-N and mobile ADL/RPL.
     // VBT chooses board routing; a family name must not exclude TC PHYs.
-    if(!property)return XELP::VBT::display13Fixed(firmwarePorts,Display13OutputWiring::Physical);
+    if(!property) {
+        auto w=XELP::VBT::display13Fixed(firmwarePorts,Display13OutputWiring::Physical);
+        // -wex-adlp-edp: add the VBT internal panel on Combo A as fixed DP.
+        if(display13PanelDP && w.valid)w.dp|=XELP::VBT::display13PanelDP(firmwarePorts)&~w.hdmi;
+        return w;
+    }
     // Preserve the older ADL-N Combo property contract. It cannot select TC.
     if(adlpDisplaySelected)return {};
     auto wiring=OSDynamicCast(OSData,property);
@@ -3875,7 +3880,7 @@ void XE::adlnBootstrap(IOPCIDevice *pci) {
 	// Bootstrap runs before framebuffer start loads its board policy. Native
 	// GOP qualification must already use that physical port, not assume B.
     const auto board=display13BoardWiring(pci);adlnOutputWiring=board;
-    if(displayRequested && !Display13FBTopology::supportedWiring(board,xeProfile.display==XELP::Display::XeLPD)) {
+    if(displayRequested && !Display13FBTopology::supportedWiring(board,xeProfile.display==XELP::Display::XeLPD,display13ComboDP())) {
         pci->setProperty("N97NativeRoutingUnavailable",true);return;
     }
 	auto bootDDI=displayRequested ? UINT32_MAX : 1U;
@@ -4176,9 +4181,11 @@ bool XE::xelpBindProbe(void *controller) {
         config.legacyBackend=tglAUXParentMask;
     } else {
         if(!display13FBTopologyHooksReady || controller!=adlnTopologyController ||
-            !Display13FBTopology::supportedWiring(adlnOutputWiring,xeProfile.display==XELP::Display::XeLPD) ||
+            !Display13FBTopology::supportedWiring(adlnOutputWiring,xeProfile.display==XELP::Display::XeLPD,display13ComboDP()) ||
             ((adlnOutputWiring.selected()&0x78) && (!display13TCProbeReady || !display13FBTCHooksReady)) ||
-            (adlnOutputWiring.dp && (!display13TCDPProbeReady || !display13FBSSTHooksReady || !display13FBAUXHooksReady)))return false;
+            ((adlnOutputWiring.dp&0x78) && !display13TCDPProbeReady) ||
+            ((adlnOutputWiring.dp&3) && !display13DPProbeReady) ||
+            (adlnOutputWiring.dp && (!display13FBSSTHooksReady || !display13FBAUXHooksReady)))return false;
         config.combo=adlnOutputWiring.selected()&3;config.comboBackend=3;
         config.legacy=adlnOutputWiring.selected()&0x78;config.legacyBackend=config.legacy?0x78:0;
     }
@@ -5289,6 +5296,13 @@ bool XE::processDisplay13Framebuffer(KernelPatcher &patcher,size_t index,mach_vm
 	display13FBOutputHooksReady=processDisplay13FramebufferOutput(patcher,index,address,size);
     display13FBTCHooksReady=processDisplay13FramebufferTC(patcher,index,address,size);
     IORegistryEntry::getRegistryRoot()->setProperty("WEXDisplay13TCHooksReady",display13FBTCHooksReady);
+    // -wex-adlp-edp: Combo-only fixed DP uses the native Combo clock routes
+    // installed by the output stage plus the shared training lease adapter.
+    if(display13PanelDP && (adlnOutputWiring.dp&3) && !(adlnOutputWiring.selected()&0x78)) {
+        display13ComboDPReady=display13FBOutputHooksReady && display13FBSSTHooksReady && display13FBAUXHooksReady &&
+            processDisplay13Training(patcher,index,address,size);
+        IORegistryEntry::getRegistryRoot()->setProperty("WEXDisplay13ComboDPReady",display13ComboDPReady);
+    }
 	IORegistryEntry::getRegistryRoot()->setProperty("N97FBOutputHooksReady",display13FBOutputHooksReady);
 	display13FBGTTHooksReady=processDisplay13FramebufferGTT(patcher,index,address,size);
 	IORegistryEntry::getRegistryRoot()->setProperty("N97FBGTTHooksReady",display13FBGTTHooksReady);
@@ -6386,7 +6400,7 @@ bool XE::processDisplay13FramebufferTopology(KernelPatcher &patcher,size_t index
 bool XE::wrapAlderLakeNGetOSInformation(IOService *controller) {
 	auto s=callbackXE;
 	if(!s->display13FBTopologyHooksReady || !controller || controller->getMetaClass()->getClassSize()<0x1C20 ||
-		!Display13FBTopology::supportedWiring(s->adlnOutputWiring,s->xeProfile.display==XELP::Display::XeLPD) || !checkKernelArgument("-disablegfxfirmware"))return false;
+		!Display13FBTopology::supportedWiring(s->adlnOutputWiring,s->xeProfile.display==XELP::Display::XeLPD,s->display13ComboDP()) || !checkKernelArgument("-disablegfxfirmware"))return false;
 	if(!FunctionCast(wrapAlderLakeNGetOSInformation,s->orgAlderLakeNGetOSInformation)(controller))return false;
 	auto platform=Display13FBMemory::field<void *>(controller,0xD40);
 	if(!Display13FBTopology::apply(s->adlnPlatform,sizeof(s->adlnPlatform),platform,s->adlnOutputWiring))return false;
@@ -7047,7 +7061,7 @@ bool XE::processFramebufferTraining(KernelPatcher &patcher,size_t index,mach_vm_
 bool XE::processDisplay13Training(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size) {
  if(!adlnOutputWiring.dp)return true;
  using namespace FramebufferTrainingNative;
- if(!framebufferTrainingHooksReady || !display13FBDPHooksReady || !display13FBSSTHooksReady ||
+ if(!framebufferTrainingHooksReady || (!display13FBDPHooksReady && (adlnOutputWiring.dp&0x78)) || !display13FBSSTHooksReady ||
     !display13FBPowerReferencesReady || !orgDisplay13GMBusWrite)return false;
  const auto &e=entries[PortTrain];
  const auto fn=patcher.solveSymbol<mach_vm_address_t>(index,e.symbol,address,size);patcher.clearError();
@@ -7088,7 +7102,14 @@ bool XE::display13LeaseStop(void *controller,void *port) {
   IOLockLock(c.lock);auto p=display13SSTPort(port);bool ok=false;
   if(p) {
    const auto ddi=Display13FBMemory::field<uint32_t>(p,0x120);Display13TC::Port phy;
-   if(Display13TC::Port::resolve(ddi,phy)) {
+   if(ddi<2) {
+    // Combo DP: buffer stopped and DPCLKA_CFGCR0 DDI clock gated (bit 10+ddi),
+    // with no native DDI reference left by an aborted enable.
+    Display13FBSSTIO io{c.map};
+    const auto buffer=io.read(0x64000+0x100*ddi),mux=io.read(0x164280);
+    ok=buffer!=UINT32_MAX && mux!=UINT32_MAX && !(buffer&0x80000000U) &&
+     (mux&(1U<<(10+ddi))) && !c.bridge.nativeDDIRefs(ddi);
+   } else if(Display13TC::Port::resolve(ddi,phy)) {
     Display13FBTCIO io{static_cast<OSObject *>(port),ddi-3};
     if(io.powerHeld()) {
      const auto pll=io.read(phy.pll);
@@ -7177,7 +7198,7 @@ bool XE::display13StopTranscoder(void *port) {
   auto &deferred=display13DeferredClocks[pipe];
   ok=buffer!=UINT32_MAX && conf!=UINT32_MAX && func!=UINT32_MAX && tp!=UINT32_MAX && clock!=UINT32_MAX &&
    !(buffer&0x80000000U) && !(conf&0xc0000000U) && !((func|tp)&0x80000000U) &&
-   (!(clock&0xf0000000U) || (clock>>28)==ddi+3) && (!deferred.pending || deferred.port==port);
+   (!(clock&0xf0000000U) || (clock>>28)==(ddi<3?ddi+1:ddi+3)) && (!deferred.pending || deferred.port==port);
   if(ok) {
    if(!(buffer&0x80U))IODelay(8); // DDI disable: idle or >=8us before clock removal.
    const auto value=deferred.pending?deferred.value:(clock&0x0fffffffU);
@@ -7909,7 +7930,7 @@ bool XE::wrapDisplay13FramebufferStart(IOService *that,IOService *provider) {
 	if(s->tglObservationController==that)s->tglObservationController=nullptr;
 	if(!pci)return false;
     const auto board=s->display13BoardWiring(provider);
-    if(!Display13FBTopology::supportedWiring(board,s->xeProfile.display==XELP::Display::XeLPD) ||
+    if(!Display13FBTopology::supportedWiring(board,s->xeProfile.display==XELP::Display::XeLPD,s->display13ComboDP()) ||
        board.selected()!=s->adlnOutputWiring.selected())return false;
     if((board.selected()&0x78) && (!s->display13FBTCHooksReady || !s->display13TCProbeReady)) {
         IORegistryEntry::getRegistryRoot()->setProperty("ADLPFBTCUnavailable",true);return false;
@@ -13026,6 +13047,9 @@ XELP::DisplayContract::Mask XE::display13Available() const {
  // Fixed TC DP supports cold training and an explicitly validated SST GOP.
  // Boot source, memory, Mode/AUX and native path adoption are all required.
  if(display13FBDPHooksReady && display13TCDPProbeReady)a|=C::DPBoot13;
+ // Combo-only fixed DP (-wex-adlp-edp): the Combo boot AUX hold/adopt path
+ // replaces Mode, so the provider's Combo DP capability is the probe proof.
+ if(display13ComboDPReady && display13DPProbeReady && !(adlnOutputWiring.dp&0x78))a|=C::DPBoot13;
  if(display13TrainingReady)a|=C::Training12;
  if(display13FramingReady)a|=C::Framing;
  if(!display13ClockOrderReady)a&=~C::ClockOrder;

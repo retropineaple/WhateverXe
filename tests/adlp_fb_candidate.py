@@ -21,6 +21,7 @@ bool configure(void *c,const XELP::ProbeConfig *p){assert(c==(void*)1);seen=*p;+
 struct XE {
  XELP::Profile xeProfile=XELP::identify(0x46A68086,12,0x9A498086);
  XELP::VBT::Ports firmwarePorts;
+ bool display13PanelDP=false;uint32_t display13ComboDP() const {return display13PanelDP?1U:0U;}
  bool adlpDisplaySelected=true,adlsDisplaySelected=false,tglHDMIWiringApplied=false,tglTCWiringLoaded=false;
  bool display13FBTopologyHooksReady=true,display13TCProbeReady=true,display13FBTCHooksReady=true;
  bool display13TCDPProbeReady=true,display13DPProbeReady=false,display13FBSSTHooksReady=true,display13FBAUXHooksReady=true;

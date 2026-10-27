@@ -9,6 +9,8 @@ code=r'''
 #include <cstdio>
 #include "kern_xelp_platform.hpp"
 #include "kern_vbt.hpp"
+#include "kern_display13_firmware.hpp"
+static bool checkKernelArgument(const char*){return false;}
 constexpr unsigned kIODirectionIn=1,kIOMapReadOnly=2;
 struct OSData {static OSData *withBytes(const void*,unsigned){static OSData d;return &d;}void release(){}};
 struct IOMemoryDescriptor {
@@ -19,7 +21,7 @@ struct IOMemoryDescriptor {
 struct IOPCIDevice {unsigned reads=0,publications=0;uint32_t configRead32(unsigned off){assert(off==0xfc);++reads;return 0;}
  void setProperty(const char*,uint32_t,unsigned){++publications;}void setProperty(const char*,const void*,unsigned){++publications;}void setProperty(const char*,OSData*){++publications;}
 };
-struct XE {XELP::Profile xeProfile;XELP::VBT::Ports firmwarePorts;void xelpReadFirmware(IOPCIDevice*);};
+struct XE {XELP::Profile xeProfile;XELP::VBT::Ports firmwarePorts;bool display13PanelDP {};void xelpReadFirmware(IOPCIDevice*);};
 BODY
 int main(){
  for(unsigned kind=0;kind<5;++kind){XE x;IOPCIDevice pci;

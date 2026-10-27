@@ -19,7 +19,10 @@ template<class IO> bool reservedPrefix(IO &io,const AlderLakeN::DisplayReadout &
                                       AlderLakeN::GOPProtocol protocol=AlderLakeN::GOPProtocol::TMDS) {
     AlderLakeN::LinearPlan plan;
     if(!bootstrapReady || AlderLakeN::linearPlan(display,plan,ddi,protocol,tc)!=AlderLakeN::LinearStatus::Ready ||
-       plan.pipe!=0 || !memory.range(plan.surface,AlderLakeN::ScanoutBytes,true))return false;
+       plan.pipe!=0 ||
+       // The whole firmware surface must lie in the reserved range, including
+       // panels larger than the FHD-sized default reservation.
+       !memory.range(plan.surface,plan.geometry.bytes>AlderLakeN::ScanoutBytes ? plan.geometry.bytes : AlderLakeN::ScanoutBytes,true))return false;
     const auto stable=[&] {
         return AlderLakeN::bootGeometryUnchanged(io,display,plan.pipe) &&
             (ddi<3 || (tc && tc->unchanged(io))) &&
