@@ -20,7 +20,7 @@ struct Object {
  void retain(){assert(alive && refs);++refs;}
  void release(){assert(alive && refs);if(!--refs){alive=false;dispose();}}
 };
-struct OSString:Object {std::string value;explicit OSString(const char *s):value(s){}bool isEqualTo(const char *s){return value==s;}};
+struct OSString:Object {std::string value;explicit OSString(const char *s):value(s){}bool isEqualTo(const char *s){return value==s;}const char *getCStringNoCopy(){return value.c_str();}};
 struct OSNumber:Object {unsigned value;explicit OSNumber(unsigned v):value(v){}unsigned unsigned32BitValue(){return value;}};
 struct OSData:Object {std::vector<uint8_t> data;OSData(const void *p,size_t n):data((const uint8_t*)p,(const uint8_t*)p+n){}static OSData *withBytes(const void *p,size_t n){return new OSData(p,n);}};
 struct OSDictionary:Object {
@@ -64,7 +64,7 @@ bool native(IOService *panel,IOService *){
  }
  return true;
 }
-struct XeHost {static XeHost *callbackHost;IOPCIDevice *backlightGPU=nullptr;bool (*orgPanelSetDisplay)(IOService*,IOService*)=native;static bool wrapPanelSetDisplay(IOService*,IOService*);};XeHost *XeHost::callbackHost;
+struct XeHost {static XeHost *callbackHost;IOPCIDevice *backlightGPU=nullptr;bool backlightPanelEDP=false;bool (*orgPanelSetDisplay)(IOService*,IOService*)=native;static bool wrapPanelSetDisplay(IOService*,IOService*);};XeHost *XeHost::callbackHost;
 '''+body+r'''
 int main(){
  for(unsigned test=0;test<12;++test) {

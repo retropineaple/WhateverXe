@@ -10,6 +10,8 @@ private:
  XE xe;
  bool active {};
  bool backlightEnabled {};
+ // -wex-adlp-edp: ADL-P AUX-brightness panel; profile key follows the PNLF UID.
+ bool backlightPanelEDP {};
  IOPCIDevice *backlightGPU {};
  mach_vm_address_t orgPanelSetDisplay {};
  static bool wrapPanelSetDisplay(IOService *,IOService *);

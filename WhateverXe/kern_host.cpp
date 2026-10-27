@@ -35,7 +35,8 @@ void XeHost::processKernel(KernelPatcher &patcher) {
  // hooks even when the selected profile deliberately has no Render backend.
  active=profile.displayAdmitted();
  const auto display=XELP::displayAdapter(profile.family);
- backlightEnabled=active && (display==XELP::DisplayAdapter::TGL || display==XELP::DisplayAdapter::ADLS) &&
+ backlightPanelEDP=active && display==XELP::DisplayAdapter::ADLP && checkKernelArgument("-wex-adlp-edp");
+ backlightEnabled=active && (display==XELP::DisplayAdapter::TGL || display==XELP::DisplayAdapter::ADLS || backlightPanelEDP) &&
   info->firmwareVendor!=DeviceInfo::FirmwareVendor::Apple;
  backlightGPU=backlightEnabled ? gpu : nullptr;
  if(published) {
@@ -112,12 +113,18 @@ bool XeHost::wrapPanelSetDisplay(IOService *panel,IOService *display) {
  const bool range=owned && internal && framebuffer &&
   framebuffer->getAttributeForConnection(0,'bklt',pwm)==kIOReturnSuccess;
  OSDictionary *heldProfiles=nullptr;
+ // AppleIntelPanel selects F<UID>T<product>. The ADL-P eDP panel's SSDT-PNLF may
+ // report any UID; its 'bklt' range is WhateverXe's own 0..65535 DPCD scale.
+ unsigned uidValue=0;
+ if(uid)for(auto s=uid->getCStringNoCopy();*s>='0' && *s<='9' && uidValue<1000;++s)uidValue=uidValue*10+(*s-'0');
+ const unsigned profileUID=uidValue==19 || (callbackHost->backlightPanelEDP && uidValue) ? uidValue : 0;
  if(range && uid && product && pwm[1]<=UINT32_MAX && pwm[2]<=UINT32_MAX &&
-    XeBacklightProfile::eligible(uid->isEqualTo("19") ? 19 : 0,pwm[1],pwm[2],internal)) {
+    XeBacklightProfile::eligible(profileUID ? 19 : 0,pwm[1],pwm[2],internal)) {
   auto original=OSDynamicCast(OSDictionary,panel->getProperty("ApplePanels"));
   if(original && !panel->getProperty("ApplePanel")) {
-   char key[32];snprintf(key,sizeof(key),"F19T%04x",product->unsigned32BitValue());
-   if(!original->getObject(key) && !original->getObject("F19")) {
+   char key[32],family[16];snprintf(key,sizeof(key),"F%uT%04x",profileUID,product->unsigned32BitValue());
+   snprintf(family,sizeof(family),"F%u",profileUID);
+   if(!original->getObject(key) && !original->getObject(family)) {
     auto copy=OSDictionary::withDictionary(original);
     auto curve=OSData::withBytes(XeBacklightProfile::curve,sizeof(XeBacklightProfile::curve));
     if(copy && curve && copy->setObject(key,curve) && panel->setProperty("ApplePanels",copy)) {
@@ -131,7 +138,7 @@ bool XeHost::wrapPanelSetDisplay(IOService *panel,IOService *display) {
    }
   }
  }
- uint32_t inputs[]={1,owned,uid && uid->isEqualTo("19"),range ? static_cast<uint32_t>(pwm[1]) : ~0U,
+ uint32_t inputs[]={1,owned,profileUID,range ? static_cast<uint32_t>(pwm[1]) : ~0U,
   range ? static_cast<uint32_t>(pwm[2]) : 0,0};
  const bool result=FunctionCast(wrapPanelSetDisplay,callbackHost->orgPanelSetDisplay)(panel,display);
  if(heldProfiles)heldProfiles->release();
