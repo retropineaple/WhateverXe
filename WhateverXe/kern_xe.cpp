@@ -7998,6 +7998,61 @@ bool XE::wrapDisplay13FramebufferStart(IOService *that,IOService *provider) {
 	return accepted;
 }
 
+// -wex-adlp-edp diagnostics: one bit per display13SSTPort / adoptDPBootAUX
+// condition that fails, evaluated read-only under the owner lock.
+void XE::display13SSTPortRecord(void *port) {
+ auto s=callbackXE;auto &c=display13FBPower;auto object=static_cast<OSObject *>(port);
+ uint64_t r[12] {1};uint64_t &f=r[1];
+ if(!s->display13FramebufferRequested)f|=1;
+ if(s->xeProfile.display!=XELP::Display::XeLPD)f|=2;
+ if(!s->display13FBSSTHooksReady)f|=4;
+ if(!object || object->getMetaClass()->getClassSize()<0x624)f|=8;
+ if(!c.controller || c.controller!=s->adlnTopologyController)f|=0x10;
+ if(!adlnWriterMappingBound())f|=0x20;
+ if(c.clockFaulted)f|=0x40;
+ if(c.memoryFaulted)f|=0x80;
+ if(c.clockStopped)f|=0x100;
+ if(!s->adlnOutputWiring.described())f|=0x200;
+ if(!(f&8)) {
+  auto p=static_cast<uint8_t *>(port);auto config=Display13FBMemory::field<uint32_t *>(p,0x548);
+  if(!Display13FBTopology::selected(s->adlnPlatform,config,s->adlnOutputWiring))f|=0x400;
+  if(config && !(s->adlnOutputWiring.dp&(1U<<config[0])))f|=0x800;
+  if(p[0x117])f|=0x1000;
+  if(config && Display13FBMemory::field<uint32_t>(p,0x120)!=config[0])f|=0x2000;
+  if(config && Display13FBMemory::field<uint32_t>(p,0x550)!=(config[0]>=3?4U:1U))f|=0x4000;
+  if(Display13FBMemory::field<void *>(p,0x578)!=c.access)f|=0x8000;
+  r[2]=config?config[0]:UINT64_MAX;r[3]=p[0x117];r[4]=Display13FBMemory::field<uint32_t>(p,0x120);
+  r[5]=Display13FBMemory::field<uint32_t>(p,0x550);r[6]=Display13FBMemory::field<uint32_t>(p,0x554);
+  r[7]=p[0x115];r[8]=Display13FBMemory::field<uint32_t>(p,0x124);r[9]=Display13FBMemory::field<uint32_t>(p,0x128);
+  if(config){r[10]=(uint64_t(config[1])<<32)|config[2];r[11]=(uint64_t(config[4])<<32)|config[5];}
+ }
+ IORegistryEntry::getRegistryRoot()->setProperty("WEXDisplay13SSTPortReject",r,sizeof(r));
+}
+template<class IO> static void display13ComboAdoptRecord(void *port,IO &io,const AlderLakeN::DisplayReadout &boot,unsigned ddi) {
+ auto &c=display13FBPower;auto &b=c.bridge;auto &link=c.mainLink[ddi];
+ uint64_t r[10] {1};uint64_t &f=r[1];
+ if(!port)f|=1;
+ if(boot.activePipes!=1)f|=2;
+ if(!AlderLakeN::dpSource(boot,0,ddi))f|=4;
+ if(!AlderLakeN::dpSourceUnchanged(io,boot,0,ddi))f|=8;
+ if(b.bootPort!=ddi)f|=0x10;
+ if(b.bootAdopted)f|=0x20;
+ if(!b.bootPGProtected)f|=0x40;
+ if(!b.bootDDIProtected)f|=0x80;
+ if(!b.outputHeld(io,ddi,0))f|=0x100;
+ if(!b.pipeHeld(io,0))f|=0x200;
+ if(!b.ddiHeld(io,ddi))f|=0x400;
+ if(!link.bootPending)f|=0x800;
+ if(link.owner)f|=0x1000;
+ if(link.port!=ddi)f|=0x2000;
+ if(link.lease.owner!=&b.state)f|=0x4000;
+ if(link.lease.domains!=Display13Power::dependencies(Display13Power::auxDomain(ddi)))f|=0x8000;
+ if(!Display13Power::held(io,b.state,link.lease.domains))f|=0x10000;
+ r[2]=boot.activePipes;r[3]=boot.poweredPipes;r[4]=static_cast<uint32_t>(boot.status);
+ r[5]=link.port;r[6]=link.lease.domains;r[7]=io.read(Display13Power::AUX);r[8]=io.read(0x45404);r[9]=io.read(0x45454);
+ IORegistryEntry::getRegistryRoot()->setProperty("WEXDisplay13ComboAdopt",r,sizeof(r));
+}
+
 void XE::wrapAlderLakeNSetupWorkLoop(IOService *controller,IOWorkLoop *workLoop) {
 	FunctionCast(wrapAlderLakeNSetupWorkLoop,callbackXE->orgAlderLakeNSetupWorkLoop)(controller,workLoop);
 	auto &c=display13FBPower;if(!c.lock)return;
@@ -8104,6 +8159,7 @@ void XE::wrapAlderLakeNSetupWorkLoop(IOService *controller,IOWorkLoop *workLoop)
                 const auto ddi=c.bridge.bootPort;
                 const bool dp=ddi<7 && (callbackXE->adlnOutputWiring.dp&(1U<<ddi));
                 bool linked=!dp;
+                if(dp && !display13SSTPort(port))display13SSTPortRecord(port);
                 if(dp && display13SSTPort(port)) {
                     Display13FBBootIO io{c.map};const auto boot=AlderLakeN::readDisplay(io,true);
                     if(ddi>=3) {
@@ -8112,6 +8168,7 @@ void XE::wrapAlderLakeNSetupWorkLoop(IOService *controller,IOWorkLoop *workLoop)
                         linked=tc.owned(ddi) && tc.linkHeld() && boot.activePipes==1 &&
                             AlderLakeN::dpSourceUnchanged(io,boot,0,ddi,0,&source);
                     } else if(ddi<2) {
+                        display13ComboAdoptRecord(port,io,boot,ddi);
                         result=AlderLakeN::adoptDPBootAUX(io,boot,c.bridge,c.mainLink[ddi],reinterpret_cast<uintptr_t>(port),ddi);
                         linked=result.status==Display13Power::Status::Complete;
                         if(linked)port->retain(); // Released only after real buffer stop/idle.
