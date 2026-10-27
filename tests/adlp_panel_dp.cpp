@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <cstring>
 #include <vector>
+#include <string>
 #include "kern_vbt.hpp"
 #include "kern_display13_firmware.hpp"
 #include "kern_display13_fb_topology.hpp"
@@ -46,8 +47,10 @@ int main() {
     assert(!twoPanels.panel.valid);
     // The Combo A DP route is not offered for a non-A panel, a shared AUX A,
     // an HDMI A record or a VBT without panel blocks.
+    // Panel blocks are optional (PnP-selected panel type 0xFF): the route only
+    // needs the internal DP child on Combo A.
     auto noPanel=table(envy,false);auto q=parse(noPanel.data(),noPanel.size(),Family::AlderLakeP,true);
-    assert(q.valid() && !q.panel.valid && !display13PanelDP(q));
+    assert(q.valid() && !q.panel.valid && display13PanelDP(q)==1);
     auto shared=tolerant;shared.present|=1U<<3;shared.port[3]={0x68c6,9,0,0x40,0xc0,0};
     assert(!display13PanelDP(shared));
     auto hdmiA=tolerant;hdmiA.port[0].type=0x60d2;assert(!display13PanelDP(hdmiA));
@@ -78,5 +81,20 @@ int main() {
     uint32_t excluded[2];memcpy(excluded,out.data()+0x20+24+16,8);assert(excluded[0]==1 && excluded[1]==0);
     // Hotplug keeps Combo A and masks Combo B/C plus every TC source.
     assert(Display13FBTopology::excludedHotplug(out.data(),Display13FBTopology::Bytes,w)==(0x3F000000U|(6U<<16)));
+    // The real HP Envy x360 13-bf0059tu VBT (BDB 247, panel_type 0xFF).
+    std::string fixture=__FILE__;fixture=fixture.substr(0,fixture.rfind('/')+1)+"fixtures/hp-envy-x360-13-bf-vbt.bin";
+    if(FILE *f=fopen(fixture.c_str(),"rb")) {
+        std::vector<uint8_t> raw(65536);raw.resize(fread(raw.data(),1,raw.size(),f));fclose(f);
+        auto real=parse(raw.data(),raw.size(),Family::AlderLakeP,true);
+        assert(real.valid() && real.version==247 && real.duplicates==1 && !real.panel.valid);
+        assert(real.present==(3U|(0xFU<<3)) && real.port[0].type==0x1806 && real.port[0].aux==0x40);
+        assert(real.port[1].type==0x1806); // eDP-B placeholder wins over the later HDMI-B child
+        assert(display13PanelDP(real)==1);
+        auto fixed=display13Fixed(real,Display13OutputWiring::Physical);
+        assert(fixed.valid && !fixed.hdmi && !fixed.dp); // TC children are Type-C capable, not fixed
+        fixed.dp|=display13PanelDP(real);
+        assert(Display13FBTopology::supportedWiring(fixed,true,1) && fixed.selected()==1);
+        assert(parse(raw.data(),raw.size(),Family::AlderLakeP).status==Status::Conflict);
+    } else assert(!"missing VBT fixture");
     puts("adlp_panel_dp ok");
 }
