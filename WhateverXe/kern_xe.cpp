@@ -7193,6 +7193,20 @@ uint32_t XE::wrapDisplay13ReadAUX(void *port,uint32_t address,void *data,uint32_
  if(!ready)return kIOReturnNotReady;
  const auto r=FunctionCast(wrapDisplay13ReadAUX,callbackXE->orgDisplay13ReadAUX)(port,address,data,length);
  IOLockLock(c.lock);const bool complete=display13AUXReady(port,false);IOLockUnlock(c.lock);
+ // -wex-adlp-edp: an eDP 1.4 panel trained through LINK_RATE_SET (0x115)
+ // need not report a valid LINK_BW_SET (0x100); this OLED returns 0x01.
+ // AGDP derives link bandwidth from 0x100 and then rejects every mode.
+ // Report the rate the adopted link actually runs at (HBR here).
+ if(!r && complete && callbackXE->display13PanelDP && data && length && address<=0x100 && address+length>0x100 &&
+    Display13FBMemory::field<uint32_t>(port,0x120)==0) {
+  auto &bw=static_cast<uint8_t *>(data)[0x100-address];
+  if(bw!=0x06 && bw!=0x0A && bw!=0x14 && bw!=0x1E) {
+   const auto rate=Display13FBMemory::field<uint32_t>(port,0x128);
+   const uint8_t actual=rate==6?0x06:rate==10?0x0A:rate==20?0x14:rate==30?0x1E:0x0A;
+   display13PanelTrace(26,address,length,bw,actual,rate);
+   bw=actual;
+  }
+ }
  return r ? r : complete ? 0 : kIOReturnNotReady;
 }
 uint32_t XE::wrapDisplay13WriteAUX(void *port,uint32_t address,void *data,uint32_t length) {
