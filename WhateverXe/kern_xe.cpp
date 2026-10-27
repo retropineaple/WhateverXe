@@ -7043,7 +7043,7 @@ void XE::display13AUXFailRecord(void *port,uint32_t result,uint32_t command) {
 // {mach time, event, a..e}. Published after every event except AUX failures,
 // which are throttled by their own recorder.
 struct Display13PanelTraceEntry {uint64_t time,event,a,b,c,d,e;};
-static Display13PanelTraceEntry display13PanelTraceRing[160];
+static Display13PanelTraceEntry display13PanelTraceRing[400];
 static volatile uint32_t display13PanelTraceCount;
 void XE::display13PanelTrace(uint32_t event,uint64_t a,uint64_t b,uint64_t c,uint64_t d,uint64_t e) {
  if(!callbackXE || !callbackXE->display13PanelDP)return;
@@ -7108,6 +7108,39 @@ uint32_t XE::wrapPanelConnectionProbe(IOService *fb) {
  if(before!=after || restore)display13PanelTrace(24,display13FBState(fb),before|(uint64_t(after)<<8)|(uint64_t(restore)<<16),r,policy,link);
  return r;
 }
+// enableController starts an adopted online FB in kIOFBBootProgrammable
+// (-5). getCurrentDisplayMode replaces it only when the hardware timing it
+// reconstructs matches an EDID mode exactly; on this route it does not, and
+// CoreDisplay then cannot describe the mode and leaves the panel offline.
+// Select the EDID mode whose active size matches the live transcoder.
+uint32_t XE::wrapPanelCurrentMode(IOService *fb,int *mode,int *depth) {
+ const auto r=FunctionCast(wrapPanelCurrentMode,callbackXE->orgPanelCurrentMode)(fb,mode,depth);
+ if(r || !fb || fb->getMetaClass()->getClassSize()<0x4B90 || Display13FBMemory::field<int32_t>(fb,0x4250)!=-5 ||
+    Display13FBMemory::field<uint32_t>(fb,0x1DC)!=0 || !Display13FBMemory::field<uint8_t>(fb,0x1E0))return r;
+ auto &c=display13FBPower;if(!c.map || !c.map->getVirtualAddress())return r;
+ Display13FBSSTIO io{c.map};
+ const auto ht=io.read(0x60000),vt=io.read(0x6000C);
+ if(ht==UINT32_MAX || vt==UINT32_MAX || !(io.read(0x60400)&0x80000000U))return r;
+ const uint32_t width=(ht&0x3FFF)+1,height=(vt&0x3FFF)+1;
+ auto list=OSDynamicCast(OSArray,Display13FBMemory::field<OSObject *>(fb,0x4260));
+ uint64_t first[4] {UINT64_MAX,UINT64_MAX,UINT64_MAX,UINT64_MAX};
+ int32_t chosen=-5;unsigned count=list?list->getCount():0;
+ for(unsigned i=0;i<count;++i) {
+  auto data=OSDynamicCast(OSData,list->getObject(i));
+  if(!data || data->getLength()<0x58)continue;
+  auto b=static_cast<const uint8_t *>(data->getBytesNoCopy());
+  const int32_t id=*reinterpret_cast<const int32_t *>(b);
+  const uint32_t h=*reinterpret_cast<const uint32_t *>(b+0x40),v=*reinterpret_cast<const uint32_t *>(b+0x50);
+  if(i==0){first[0]=uint32_t(id);first[1]=*reinterpret_cast<const uint64_t *>(b+0x28);first[2]=(uint64_t(h)<<32)|v;
+   first[3]=(uint64_t(*reinterpret_cast<const uint32_t *>(b+0x18))<<32)|*reinterpret_cast<const uint32_t *>(b+0x1C);}
+  if(h==width && v==height){chosen=id;break;}
+ }
+ display13PanelTrace(25,(uint64_t(width)<<32)|height,count,uint32_t(chosen),first[1],first[2]);
+ if(chosen==-5)return r;
+ *reinterpret_cast<int32_t *>(reinterpret_cast<uint8_t *>(fb)+0x4250)=chosen;
+ if(mode)*mode=chosen;
+ return r;
+}
 bool XE::processDisplay13PanelTrace(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size) {
  const char *changed="__ZN21AppleIntelFramebuffer17connectionChangedEv";
  const char *online="__ZN21AppleIntelFramebuffer13getOnlineInfoEP21AppleIntelDisplayPathPhS2_";
@@ -7121,8 +7154,13 @@ bool XE::processDisplay13PanelTrace(KernelPatcher &patcher,size_t index,mach_vm_
  const uint8_t probeEntry[]={0x55,0x48,0x89,0xe5,0x41,0x56,0x53,0x48,0x83,0xec,0x10};
  const auto p=patcher.solveSymbol<mach_vm_address_t>(index,probe,address,size);patcher.clearError();
  if(p!=address+0x2DDF0 || memcmp(reinterpret_cast<void *>(p),probeEntry,sizeof(probeEntry)))return false;
+ const char *current="__ZN21AppleIntelFramebuffer21getCurrentDisplayModeEPiS0_";
+ const uint8_t currentEntry[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0xa8,0,0,0};
+ const auto m=patcher.solveSymbol<mach_vm_address_t>(index,current,address,size);patcher.clearError();
+ if(m!=address+0x32A88 || memcmp(reinterpret_cast<void *>(m),currentEntry,sizeof(currentEntry)))return false;
  KernelPatcher::RouteRequest routes[]={{changed,wrapPanelConnectionChanged,orgPanelConnectionChanged},
-  {online,wrapPanelGetOnlineInfo,orgPanelGetOnlineInfo},{probe,wrapPanelConnectionProbe,orgPanelConnectionProbe}};
+  {online,wrapPanelGetOnlineInfo,orgPanelGetOnlineInfo},{probe,wrapPanelConnectionProbe,orgPanelConnectionProbe},
+  {current,wrapPanelCurrentMode,orgPanelCurrentMode}};
  const bool ok=patcher.routeMultipleShort(index,routes,arrsize(routes),address,size);patcher.clearError();
  IORegistryEntry::getRegistryRoot()->setProperty("WEXPanelTraceReady",ok);
  // IntelFBClientControl::doAttribute forwards AGDC's per-FB online request to
@@ -8039,7 +8077,8 @@ uint32_t XE::wrapAlderLakeNConnectionAttr(IOService *fb,int connection,uint32_t 
     adlnFrontendSnapshot(fb,r);adlnPublishFrontend("Attr","Entry",r);
     const auto result=FunctionCast(wrapAlderLakeNConnectionAttr,callbackXE->orgAlderLakeNConnectionAttr)(fb,connection,attribute,value);
     r[5]=result;r[6]=!result && value ? *value : 0;adlnFrontendSnapshot(fb,r);adlnPublishFrontend("Attr","Last",r);
-    display13PanelTrace(1,r[2],attribute,result,r[6],display13FBState(fb));
+    if(attribute=='enab' || attribute=='cena' || attribute=='chng' || attribute=='flgs')
+        display13PanelTrace(1,r[2],attribute,result,r[6],display13FBState(fb));
     if(attribute=='cena' || attribute=='enab' || attribute=='flgs') {
         char key[64];snprintf(key,sizeof(key),"N97FBAttr%u_%08x",static_cast<uint32_t>(r[2]),attribute);
         IORegistryEntry::getRegistryRoot()->setProperty(key,r,sizeof(r));
