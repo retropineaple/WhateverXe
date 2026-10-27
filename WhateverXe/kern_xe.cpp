@@ -7221,6 +7221,12 @@ uint32_t XE::wrapDisplay13ReadAUX(void *port,uint32_t address,void *data,uint32_
  // need not report a valid LINK_BW_SET (0x100); this OLED returns 0x01.
  // AGDP derives link bandwidth from 0x100 and then rejects every mode.
  // Report the rate the adopted link actually runs at (HBR here).
+ // Train the firmware-proven 4 x HBR configuration: cap MAX_LINK_RATE.
+ if(!r && complete && callbackXE->display13PanelDP && data && length && address<=0x001 && address+length>0x001 &&
+    Display13FBMemory::field<uint32_t>(port,0x120)==0) {
+  auto &max=static_cast<uint8_t *>(data)[0x001-address];
+  if(max>0x0A)max=0x0A;
+ }
  if(!r && complete && callbackXE->display13PanelDP && data && length && address<=0x100 && address+length>0x100 &&
     Display13FBMemory::field<uint32_t>(port,0x120)==0) {
   auto &bw=static_cast<uint8_t *>(data)[0x100-address];
@@ -7233,10 +7239,43 @@ uint32_t XE::wrapDisplay13ReadAUX(void *port,uint32_t address,void *data,uint32_
  }
  return r ? r : complete ? 0 : kIOReturnNotReady;
 }
+// -wex-adlp-edp: eDP 1.4 rate-table sinks select the link rate through
+// LINK_RATE_SET (0x115); firmware leaves it set, so a LINK_BW_SET-only
+// retrain leaves source and sink at different rates. Like Linux, write
+// LINK_BW_SET=0 and the matching LINK_RATE_SET index from the sink table.
+static int display13PanelRateIndex(void *port,uint8_t code,uint32_t (*read)(void *,uint32_t,void *,uint32_t)) {
+ static uint16_t table[8];static bool loaded;
+ if(!loaded) {
+  uint8_t raw[16] {};
+  if(read(port,0x010,raw,sizeof(raw)))return -1;
+  for(unsigned i=0;i<8;++i)table[i]=uint16_t(raw[2*i]|(raw[2*i+1]<<8));
+  loaded=true;
+ }
+ // DPCD rate-table units are 200 kHz; LINK_BW_SET codes are 0.27 Gbps.
+ const uint32_t wanted=uint32_t(code)*1350;
+ for(unsigned i=0;i<8 && table[i];++i)if(table[i]==wanted)return int(i);
+ return -1;
+}
 uint32_t XE::wrapDisplay13WriteAUX(void *port,uint32_t address,void *data,uint32_t length) {
  auto &c=display13FBPower;if(!c.lock)return kIOReturnNotReady;
  IOLockLock(c.lock);const bool ready=display13AUXReady(port,false);IOLockUnlock(c.lock);
  if(!ready)return kIOReturnNotReady;
+ auto s=callbackXE;
+ if(s->display13PanelDP && data && length && length<=16 && address<=0x100 && address+length>0x100 &&
+    Display13FBMemory::field<uint32_t>(port,0x120)==0) {
+  const auto code=static_cast<const uint8_t *>(data)[0x100-address];
+  const auto index=code==0x06||code==0x0A||code==0x14||code==0x1E ?
+   display13PanelRateIndex(port,code,reinterpret_cast<uint32_t (*)(void *,uint32_t,void *,uint32_t)>(s->orgDisplay13ReadAUX)) : -1;
+  if(index>=0) {
+   uint8_t copy[16];memcpy(copy,data,length);copy[0x100-address]=0;
+   auto r=FunctionCast(wrapDisplay13WriteAUX,s->orgDisplay13WriteAUX)(port,address,copy,length);
+   uint8_t select=uint8_t(index);
+   if(!r)r=FunctionCast(wrapDisplay13WriteAUX,s->orgDisplay13WriteAUX)(port,0x115,&select,1);
+   display13PanelTrace(28,code,index,r,length>1 && address<=0x101 ? static_cast<const uint8_t *>(data)[0x101-address] : 0xFF);
+   IOLockLock(c.lock);const bool complete=display13AUXReady(port,false);IOLockUnlock(c.lock);
+   return r ? r : complete ? 0 : kIOReturnNotReady;
+  }
+ }
  const auto r=FunctionCast(wrapDisplay13WriteAUX,callbackXE->orgDisplay13WriteAUX)(port,address,data,length);
  IOLockLock(c.lock);const bool complete=display13AUXReady(port,false);IOLockUnlock(c.lock);
  return r ? r : complete ? 0 : kIOReturnNotReady;
