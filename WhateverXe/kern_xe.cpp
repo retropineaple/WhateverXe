@@ -7288,27 +7288,17 @@ uint32_t XE::display13PanelSetBrightness(IOService *fb,uint32_t value) {
   if(!count || count>16)return kIOReturnUnsupported;
   bits=count;
  }
- // 'bklt' 0 is "panel off" (lid closed with sleep disabled, display dim to
- // off, lowest key step), as on Apple panels: clear BACKLIGHT_ENABLE
- // (0x720 bit 0) instead of leaving the OLED lit at the floor level.
- static bool off;
- if(!value && s->panelBrightnessDPCD) {
-  uint8_t control=uint8_t(block[0]&~1U);
-  r=off ? 0 : wrapDisplay13WriteAUX(port,0x720,&control,1);
-  if(!r)off=true;
-  display13PanelTrace(34,value,0,r,(uint64_t(bits)<<8)|2|s->panelBrightnessDPCD);
-  return r;
- }
+ // 'bklt' 0 is "panel off" (lid closed with sleep disabled, dim to off,
+ // lowest key step), as on Apple panels. Write DPCD level 0: the OLED goes
+ // dark and any later level restores it. BACKLIGHT_ENABLE (0x720 bit 0) is
+ // not used for this: the panel reports it clear while lit (BL_EN pin) and
+ // does not come back when it is set again.
  const uint32_t max=(1U<<bits)-1,floor=max/128 ? max/128 : 1;
  uint32_t level=uint32_t((uint64_t(value>0xFFFF ? 0xFFFF : value)*max+0x7FFF)/0xFFFF);
- if(level<floor)level=floor; // DPCD 0 turns the OLED fully dark.
+ if(value && level<floor)level=floor;
+ if(!value)level=0;
  uint8_t bytes[2]={uint8_t(level>>8),uint8_t(level)};
  r=wrapDisplay13WriteAUX(port,0x722,bytes,2);
- if(!r && off) {
-  uint8_t control=uint8_t(block[0]|1U);
-  r=wrapDisplay13WriteAUX(port,0x720,&control,1);
-  if(!r)off=false;
- }
  if(!r && !s->panelBrightnessDPCD) {
   // Level first, then DPCD control (0x721 bits 1:0 = 2) and AUX enable (0x720 bit 0).
   uint8_t mode=uint8_t((block[1]&~3U)|2U),control=uint8_t(block[0]|1U);
@@ -7316,6 +7306,7 @@ uint32_t XE::display13PanelSetBrightness(IOService *fb,uint32_t value) {
   if(!r && control!=block[0])r=wrapDisplay13WriteAUX(port,0x720,&control,1);
   if(!r)s->panelBrightnessDPCD=true;
  }
+ IOLog("WhateverXe: panel bklt %#x -> DPCD %#x res %#x\n",value,level,r);
  display13PanelTrace(34,value,level,r,(uint64_t(bits)<<8)|s->panelBrightnessDPCD);
  return r;
 }
