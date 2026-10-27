@@ -8253,6 +8253,10 @@ uint32_t XE::wrapAlderLakeNConnectionAttr(IOService *fb,int connection,uint32_t 
     uint64_t r[16] {1,2,0,static_cast<uint32_t>(connection),attribute};
     adlnFrontendSnapshot(fb,r);adlnPublishFrontend("Attr","Entry",r);
     const auto result=FunctionCast(wrapAlderLakeNConnectionAttr,callbackXE->orgAlderLakeNConnectionAttr)(fb,connection,attribute,value);
+    // -wex-adlp-edp: the panel rides a DP connector record, so native reports
+    // external flags. Mark FB0 built-in (kIOConnectionBuiltIn) like LVDS/eDP.
+    if(callbackXE->display13PanelDP && attribute=='flgs' && !result && value && !connection && fb &&
+       fb->getMetaClass()->getClassSize()>=0x1E0 && !Display13FBMemory::field<uint32_t>(fb,0x1DC))*value|=0x800;
     r[5]=result;r[6]=!result && value ? *value : 0;adlnFrontendSnapshot(fb,r);adlnPublishFrontend("Attr","Last",r);
     if(attribute=='enab' || attribute=='cena' || attribute=='chng' || attribute=='flgs')
         display13PanelTrace(1,r[2],attribute,result,r[6],display13FBState(fb));
