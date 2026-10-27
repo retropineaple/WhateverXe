@@ -335,7 +335,7 @@ template<class IO> Latch latch(IO &io,const Snapshot &s) {
     if(!Display13FBIRQ::powered(wells,s.pipeIndex)) {r.status=Status::Power;return r;}
     const auto ht=io.read(0x60000+bank),vt=io.read(0x6000C+bank);
     const auto htotal=((ht>>16)&0x3FFF)+1,vtotal=((vt>>16)&0x3FFF)+1;
-    if(ht==UINT32_MAX || vt==UINT32_MAX || htotal!=s.primary->htotal || !s.primary->height || s.primary->height>8192 || vtotal<s.primary->height || !s.primary->pixelHz) {r.status=Status::Input;return r;}
+    if(ht==UINT32_MAX || vt==UINT32_MAX || htotal!=s.primary->htotal || !s.primary->height || s.primary->height>8192 || s.primary->height>3*vtotal || !s.primary->pixelHz) {r.status=Status::Input;return r;}
     const auto period=ceilDiv(uint64_t(htotal)*vtotal*1000000,s.pipePixelHz);
     if(period<1000 || period>100000) {r.status=Status::Input;return r;}
     r.budgetUs=static_cast<uint32_t>(3*period+1000);
