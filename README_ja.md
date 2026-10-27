@@ -142,7 +142,7 @@ FBの立上げ時は、任意の`-wex-noaccel`引数でAcceleratorの起動を�
 Alder Lake-N / Twin LakeとAlder Lake-H/P/U / Raptor Lake-H/P/UではGPU資源のprobeも省略し、FB独自の起動メモリ・MMIOの確認は維持します。
 未対応のDisplayバックエンドを有効にする引数ではありません。
 
-開発時の一時診断用に `-wex-adlp-readout` を指定すると、GPUドライバの受付を閉じたままADL-Pの起動資源を採取します。対応済みハードウェアでは不要です。
+開発時の一時診断用に `-wex-adlp-readout` を指定すると、GPUドライバの受付を閉じたままADL-Pの起動資源を採取します。対応済みハードウェアでは不要です。ファームウェアが設定したeDP経路（トランスコーダ、PPS、バックライト、PSR、PLL、Combo PHY Aのレジスタ）とVBT、およびアイドル状態のAUX A経由で読み出したシンクのDPCDも記録します。DPCDの読み出しを省くには `-wex-adlp-readout-noaux` を追加します。
 `-wex-adlp-load-only` は選択済みADL-P/RPL-Pで、FramebufferとAccelerator両方のnative probe/startを止め、GPUを初期化せずにロード段階を診断します。
 `-wex-display13-offline` はAlder Lake-N / Twin LakeとAlder Lake-H/P/U / Raptor Lake-H/P/Uのnative display controller初期化を有効に保ち、選択した出力を未接続として扱います。FB診断でHPD/EDIDとmode設定を切り離すための設定で、表示成立を意味しません。
 

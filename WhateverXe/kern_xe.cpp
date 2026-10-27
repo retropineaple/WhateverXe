@@ -44,6 +44,7 @@
 #include "kern_tgl_combo_signal.hpp"
 #include "kern_tgl_panel_depth.hpp"
 #include "kern_xelp_panel_power.hpp"
+#include "kern_adlp_edp_readout.hpp"
 #include "kern_tgl_pcode_gate.hpp"
 #include "kern_tgl_pcode_edram.hpp"
 #include "kern_tgl_tc_cold.hpp"
@@ -4255,11 +4256,19 @@ void XE::processKernel(KernelPatcher &patcher, DeviceInfo *info) {
             physicalGPU->setProperty("ADLPDisplayBoot",registers,sizeof(registers));
             auto display=AlderLakeN::readDisplay(io,true);
             physicalGPU->setProperty("ADLPScanoutBoot",&display,sizeof(display));
+            // ADLP_EDP_READOUT: firmware eDP path, PPS/backlight/PSR and sink DPCD.
+            static ADLPEDPReadout::Result edp;
+            ADLPEDPReadout::capture(io,edp,!checkKernelArgument("-wex-adlp-readout-noaux"));
+            physicalGPU->setProperty("ADLPEDPBoot",&edp,sizeof(edp));
+            SYSLOG("igfx","ADL-P eDP readout aux=%x power=%x dpcd=%u/%u",edp.auxBefore,edp.auxPower,
+                edp.windowsRead,ADLPEDPReadout::WindowCount);
+            // ADLP_EDP_READOUT_END
             SYSLOG("igfx","ADL-P readout status=%u fuses=%x/%x/%x/%x/%x release=%x/%x; donor blocked",
                 static_cast<unsigned>(gt.status),gt.fuses[0],gt.fuses[1],gt.fuses[2],gt.fuses[3],gt.fuses[4],
                 gt.releasedMask,gt.releaseFailedMask);
         }
         if(map)map->release();
+        xelpReadFirmware(physicalGPU); // VBT/OpRegion only; publishes TGLVBT
         return;
     }
     if(display12SmallGTDetected && XELP::display12SmallGTDevice(xeProfile.identity) &&

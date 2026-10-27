@@ -19,6 +19,7 @@ code=r'''
 #include "kern_xelp_os.hpp"
 #include "kern_alderlake_n.hpp"
 #include "kern_xelp_gt_resources.hpp"
+#include "kern_adlp_edp_readout.hpp"
 using mach_vm_address_t=uintptr_t;
 #define arrsize(a) (sizeof(a)/sizeof((a)[0]))
 #define SYSLOG(...) do{}while(0)
@@ -62,6 +63,7 @@ struct XE {
  bool adlpLoadOnly=false,adlpDisplaySelected=false;XELP::Profile xeProfile;unsigned initialized=0;
  DiagnosticGPU *physicalGPU=nullptr;
  void select(){SELECTION ++initialized;}
+ unsigned firmwareReads=0;void xelpReadFirmware(DiagnosticGPU *){++firmwareReads;}
  void diagnose(){DIAGNOSTIC ++initialized;}
  bool processADLPLoadOnly(KernelPatcher &,size_t,mach_vm_address_t,size_t);
  static IOService *rejectADLPFramebufferProbe(IOService *,IOService *,SInt32 *);
@@ -81,7 +83,8 @@ int main(){
   XE xe;DiagnosticGPU gpu;gpu.command=powered?2:0;xe.physicalGPU=&gpu;readout=enabled;
   xe.xeProfile=XELP::identify((physical<<16)|0x8086,12);xe.diagnose();
   const bool blocked=enabled && physical!=0x4c8a;
-  assert(xe.adlpLoadOnly==blocked && xe.initialized==!blocked && gpu.maps==unsigned(blocked&&powered));++cases;
+  assert(xe.adlpLoadOnly==blocked && xe.initialized==!blocked && gpu.maps==unsigned(blocked&&powered));
+  assert(xe.firmwareReads==unsigned(blocked&&powered));++cases;
  }
  readout=false;
  for(unsigned index:{1U,2U})for(unsigned bad=0;bad<4;++bad){
