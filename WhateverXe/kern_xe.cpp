@@ -7135,6 +7135,12 @@ uint32_t XE::wrapPanelCurrentMode(IOService *fb,int *mode,int *depth) {
    first[3]=(uint64_t(*reinterpret_cast<const uint32_t *>(b+0x18))<<32)|*reinterpret_cast<const uint32_t *>(b+0x1C);}
   if(h==width && v==height){chosen=id;break;}
  }
+ // Until CoreDisplay installs the EDID timings (setDetailedTimings), the
+ // donor has no mode list and cannot describe -5 at all, while CoreDisplay
+ // will not install timings for a display whose current mode it cannot
+ // describe. Report the first EDID detailed-timing ID (the panel's native
+ // mode, which is the timing the firmware left running) to break the cycle.
+ if(chosen==-5 && !count)chosen=int32_t(0x80001000);
  display13PanelTrace(25,(uint64_t(width)<<32)|height,count,uint32_t(chosen),first[1],first[2]);
  if(chosen==-5)return r;
  *reinterpret_cast<int32_t *>(reinterpret_cast<uint8_t *>(fb)+0x4250)=chosen;
