@@ -178,6 +178,12 @@ private:
  static void display13SSTPortRecord(void *port);
  static void display13PanelWriteRecord(uint32_t reg,uint32_t original,uint32_t value,uintptr_t caller);
  static void display13AUXFailRecord(void *port,uint32_t result,uint32_t command);
+ // -wex-adlp-edp time-ordered display trace.
+ static void display13PanelTrace(uint32_t event,uint64_t a=0,uint64_t b=0,uint64_t c=0,uint64_t d=0,uint64_t e=0);
+ bool processDisplay13PanelTrace(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size);
+ mach_vm_address_t orgPanelConnectionChanged {},orgPanelGetOnlineInfo {};
+ static uint32_t wrapPanelConnectionChanged(IOService *fb);
+ static uint32_t wrapPanelGetOnlineInfo(IOService *fb,void *path,uint8_t *online,uint8_t *info);
  static bool display13HDMIPort(void *port);
  static uint32_t wrapDisplay13TrainingPattern(void *path,uint32_t pattern);
  static uint32_t wrapDisplay13SignalLevels(void *port,uint32_t swing,uint32_t emphasis,void *overrideConfig);

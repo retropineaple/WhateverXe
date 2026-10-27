@@ -6371,6 +6371,8 @@ IOReturn XE::adlnSetupAuxiliaryMemory(IOService *controller,bool dsb) {
 IOReturn XE::wrapDisplay13CursorSetup(IOService *controller) {return adlnSetupAuxiliaryMemory(controller,false);}
 IOReturn XE::wrapAlderLakeNDSBSetup(IOService *controller) {return adlnSetupAuxiliaryMemory(controller,true);}
 
+static uint64_t display13FBState(IOService *fb);
+static uint64_t display13LinkState();
 bool XE::processDisplay13FramebufferTopology(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size) {
 	const char *os="__ZN31AppleIntelFramebufferController16getOSInformationEv";
 	const char *state="__ZN14AppleIntelPort14probePortStateEv";
@@ -6451,6 +6453,7 @@ uint32_t XE::wrapAlderLakeNPortState(OSObject *port) {
         root->setProperty("N97FBPortProbeEntry",r,sizeof(r));
         const auto result=FunctionCast(wrapAlderLakeNPortState,s->orgAlderLakeNPortState)(port); // Real selected HPD/EDID path.
         r[7]=result;r[8]=Display13FBMemory::field<uint32_t>(port,0x550);r[9]=Display13FBMemory::field<uint32_t>(port,0x554);
+        display13PanelTrace(4,config[0],result,r[8],r[9],display13LinkState());
         root->setProperty("N97FBPortProbeLast",r,sizeof(r));
         if(call<=16) {char key[40];snprintf(key,sizeof(key),"N97FBPortProbeFirst%u",call);root->setProperty(key,r,sizeof(r));}
         return result;
@@ -6562,7 +6565,7 @@ void XE::wrapDisplay13TCEnableClocks(void *controller,void *raw,void *other,uint
     auto self=callbackXE;auto port=static_cast<OSObject *>(raw);auto &c=display13FBPower;
     auto config=port && port->getMetaClass()->getClassSize()>=0x580 ? Display13FBMemory::field<uint32_t *>(port,0x548):nullptr;
     if(config && config[0]<3) {
-        bool keep=false;
+        bool keep=false;display13PanelTrace(9,config[0],0,display13LinkState());
         if(!comboClockTarget(controller,raw,other) || !comboBeginClock(controller,raw,true,keep,other)) {
             adlnFault(c.clockFaulted,__LINE__);return;
         }
@@ -6600,7 +6603,7 @@ void XE::wrapDisplay13TCDisableClocks(void *controller,void *raw,void *other) {
     auto self=callbackXE;auto port=static_cast<OSObject *>(raw);auto &c=display13FBPower;
     auto config=port && port->getMetaClass()->getClassSize()>=0x580 ? Display13FBMemory::field<uint32_t *>(port,0x548):nullptr;
     if(config && config[0]<3) {
-        bool keep=false;
+        bool keep=false;display13PanelTrace(10,config[0],0,display13LinkState());
         if(!comboClockTarget(controller,raw,other) || !comboBeginClock(controller,raw,false,keep)) {
             adlnFault(c.clockFaulted,__LINE__);return;
         }
@@ -6927,6 +6930,7 @@ bool XE::processDisplay13FramebufferOutput(KernelPatcher &patcher,size_t index,m
     const bool complete=ready && comboReady && processDisplay13FramebufferColor(patcher,index,address,size) &&
         processDisplay13FramebufferSST(patcher,index,address,size) && processDisplay13FramebufferAUX(patcher,index,address,size);
     adlnComboPLLFractionCaller=complete ? address+0x6D973 : 0;
+    if(complete && display13PanelDP)processDisplay13PanelTrace(patcher,index,address,size);
     return complete;
 }
 
@@ -7029,9 +7033,74 @@ void XE::display13AUXFailRecord(void *port,uint32_t result,uint32_t command) {
  auto root=IORegistryEntry::getRegistryRoot();
  if(n==1)root->setProperty("WEXDisplay13AUXFailFirst",r,sizeof(r));
  root->setProperty("WEXDisplay13AUXFailLast",r,sizeof(r));
+ display13PanelTrace(5,n,result,command,r[12]&0xFFFFFFFFU,r[11]&0xFFFFFFFFU);
  Display13PanelWrite copy[48];memcpy(copy,display13PanelWrites,sizeof(copy));
  root->setProperty("WEXDisplay13PanelWrites",copy,sizeof(copy));
  root->setProperty("WEXDisplay13PanelWriteCount",display13PanelWriteCount,32);
+}
+
+// Ordered event trace for the -wex-adlp-edp bring-up. Each entry:
+// {mach time, event, a..e}. Published after every event except AUX failures,
+// which are throttled by their own recorder.
+struct Display13PanelTraceEntry {uint64_t time,event,a,b,c,d,e;};
+static Display13PanelTraceEntry display13PanelTraceRing[160];
+static volatile uint32_t display13PanelTraceCount;
+void XE::display13PanelTrace(uint32_t event,uint64_t a,uint64_t b,uint64_t c,uint64_t d,uint64_t e) {
+ if(!callbackXE || !callbackXE->display13PanelDP)return;
+ const auto n=__sync_fetch_and_add(&display13PanelTraceCount,1);
+ if(n>=arrsize(display13PanelTraceRing))return; // keep the boot-time prefix
+ display13PanelTraceRing[n]={mach_absolute_time(),event,a,b,c,d,e};
+ if(event==5 && n>8)return;
+ IORegistryEntry::getRegistryRoot()->setProperty("WEXPanelTrace",display13PanelTraceRing,
+  sizeof(Display13PanelTraceEntry)*(n+1));
+}
+static uint64_t display13FBState(IOService *fb) {
+ if(!fb || fb->getMetaClass()->getClassSize()<0x4B90)return UINT64_MAX;
+ // 0x1DC index | 0x1E0 online | 0x1E1 | 0x1E2 | 0x1E4 | 0x1E6 | 0x44E0 flags
+ return uint64_t(Display13FBMemory::field<uint32_t>(fb,0x1DC)&0xFF) |
+  (uint64_t(Display13FBMemory::field<uint8_t>(fb,0x1E0))<<8) | (uint64_t(Display13FBMemory::field<uint8_t>(fb,0x1E1))<<16) |
+  (uint64_t(Display13FBMemory::field<uint8_t>(fb,0x1E2))<<24) | (uint64_t(Display13FBMemory::field<uint8_t>(fb,0x1E4))<<32) |
+  (uint64_t(Display13FBMemory::field<uint8_t>(fb,0x1E6))<<40) | (uint64_t(Display13FBMemory::field<uint16_t>(fb,0x44E0))<<48);
+}
+static uint64_t display13LinkState() {
+ auto &c=display13FBPower;if(!c.map || !c.map->getVirtualAddress())return UINT64_MAX;
+ Display13FBSSTIO io{c.map};
+ // DDI_BUF_CTL_A | TRANS_DDI_FUNC_CTL_A<<32 (enable bits are what matter)
+ return uint64_t(io.read(0x64000))|(uint64_t(io.read(0x60400))<<32);
+}
+uint32_t XE::wrapPanelConnectionChanged(IOService *fb) {
+ display13PanelTrace(20,display13FBState(fb),display13LinkState());
+ const auto r=FunctionCast(wrapPanelConnectionChanged,callbackXE->orgPanelConnectionChanged)(fb);
+ display13PanelTrace(21,display13FBState(fb),display13LinkState(),r);
+ return r;
+}
+uint32_t XE::wrapPanelGetOnlineInfo(IOService *fb,void *path,uint8_t *online,uint8_t *info) {
+ display13PanelTrace(22,display13FBState(fb),display13LinkState());
+ const auto r=FunctionCast(wrapPanelGetOnlineInfo,callbackXE->orgPanelGetOnlineInfo)(fb,path,online,info);
+ uint64_t port=0;
+ if(path && static_cast<OSObject *>(path)->getMetaClass()->getClassSize()>=0x3730) {
+  auto p=Display13FBMemory::field<uint8_t *>(path,0x3648);
+  if(p)port=uint64_t(p[0x16])|(uint64_t(p[0x17])<<8)|(uint64_t(p[0x18])<<16)|(uint64_t(p[0x116])<<24)|
+   (uint64_t(p[0xF8])<<32)|(uint64_t(Display13FBMemory::field<uint32_t>(p,0x554)&0xFF)<<40)|
+   (uint64_t(Display13FBMemory::field<uint32_t>(p,0x550)&0xFF)<<48);
+ }
+ display13PanelTrace(23,display13FBState(fb),online?*online:0xFF,r,port,display13LinkState());
+ return r;
+}
+bool XE::processDisplay13PanelTrace(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size) {
+ const char *changed="__ZN21AppleIntelFramebuffer17connectionChangedEv";
+ const char *online="__ZN21AppleIntelFramebuffer13getOnlineInfoEP21AppleIntelDisplayPathPhS2_";
+ const uint8_t changedEntry[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x54,0x53,0x48,0x81,0xec,0xa0,0,0,0};
+ const uint8_t onlineEntry[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0x98,0,0,0};
+ const auto c=patcher.solveSymbol<mach_vm_address_t>(index,changed,address,size);patcher.clearError();
+ const auto o=patcher.solveSymbol<mach_vm_address_t>(index,online,address,size);patcher.clearError();
+ if(c!=address+0x2E0E6 || o!=address+0x2E232 || memcmp(reinterpret_cast<void *>(c),changedEntry,sizeof(changedEntry)) ||
+    memcmp(reinterpret_cast<void *>(o),onlineEntry,sizeof(onlineEntry)))return false;
+ KernelPatcher::RouteRequest routes[]={{changed,wrapPanelConnectionChanged,orgPanelConnectionChanged},
+  {online,wrapPanelGetOnlineInfo,orgPanelGetOnlineInfo}};
+ const bool ok=patcher.routeMultipleShort(index,routes,arrsize(routes),address,size);patcher.clearError();
+ IORegistryEntry::getRegistryRoot()->setProperty("WEXPanelTraceReady",ok);
+ return ok;
 }
 
 uint32_t XE::wrapDisplay13ReadAUX(void *port,uint32_t address,void *data,uint32_t length) {
@@ -7347,7 +7416,7 @@ bool XE::display13MainLinkAUX(void *port,bool acquire) {
 }
 
 uint32_t XE::wrapDisplay13EnablePort(void *port) {
- auto s=callbackXE;
+ auto s=callbackXE;display13PanelTrace(6,Display13FBMemory::field<uint32_t>(port,0x120),0,display13LinkState());
  if(!s->adlnOutputWiring.dp || display13HDMIPort(port))
   return FunctionCast(wrapDisplay13EnablePort,s->orgDisplay13EnablePort)(port);
  if(!display13MainLinkAUX(port,true))return kIOReturnNotReady;
@@ -7357,7 +7426,7 @@ uint32_t XE::wrapDisplay13EnablePort(void *port) {
 }
 
 uint32_t XE::wrapDisplay13DisablePort(void *port) {
- auto s=callbackXE;
+ auto s=callbackXE;display13PanelTrace(7,Display13FBMemory::field<uint32_t>(port,0x120),0,display13LinkState());
  if(!s->adlnOutputWiring.dp || display13HDMIPort(port))
   return FunctionCast(wrapDisplay13DisablePort,s->orgDisplay13DisablePort)(port);
  if(!display13MainLinkAUX(port,true))return kIOReturnNotReady;
@@ -7395,7 +7464,7 @@ uint32_t XE::wrapDisplay13SignalLevels(void *port,uint32_t swing,uint32_t emphas
 }
 
 uint32_t XE::wrapDisplay13TrainingPattern(void *path,uint32_t pattern) {
- auto s=callbackXE;auto &c=display13FBPower;
+ auto s=callbackXE;auto &c=display13FBPower;display13PanelTrace(8,pattern,0,display13LinkState());
  if(!s->adlnOutputWiring.dp)return FunctionCast(wrapDisplay13TrainingPattern,s->orgDisplay13TrainingPattern)(path,pattern);
  auto object=static_cast<OSObject *>(path);
  if(!c.lock || !object || object->getMetaClass()->getClassSize()<0x3730)return kIOReturnNotReady;
@@ -7930,6 +7999,7 @@ uint32_t XE::wrapAlderLakeNConnectionAttr(IOService *fb,int connection,uint32_t 
     adlnFrontendSnapshot(fb,r);adlnPublishFrontend("Attr","Entry",r);
     const auto result=FunctionCast(wrapAlderLakeNConnectionAttr,callbackXE->orgAlderLakeNConnectionAttr)(fb,connection,attribute,value);
     r[5]=result;r[6]=!result && value ? *value : 0;adlnFrontendSnapshot(fb,r);adlnPublishFrontend("Attr","Last",r);
+    display13PanelTrace(1,r[2],attribute,result,r[6],display13FBState(fb));
     if(attribute=='cena' || attribute=='enab' || attribute=='flgs') {
         char key[64];snprintf(key,sizeof(key),"N97FBAttr%u_%08x",static_cast<uint32_t>(r[2]),attribute);
         IORegistryEntry::getRegistryRoot()->setProperty(key,r,sizeof(r));
@@ -7947,6 +8017,7 @@ uint32_t XE::wrapAlderLakeNPortDDC(OSObject *port,uint32_t block,uint8_t *data,b
     uint64_t r[8] {1,block,force,0,0,config ? config[0] : 9};
     auto root=IORegistryEntry::getRegistryRoot();if(selected)root->setProperty("N97FBPortDDCEntry",r,sizeof(r));
     const auto result=FunctionCast(wrapAlderLakeNPortDDC,callbackXE->orgAlderLakeNPortDDC)(port,block,data,force);r[3]=result;
+    if(selected)display13PanelTrace(11,block,result,config?config[0]:9,display13LinkState());
     if(selected) {
         if(!result && data && (block==1 || block==2)) {
             uint32_t sum=0;for(unsigned i=0;i<128;++i)sum+=data[i];r[4]=sum&255;
@@ -8247,6 +8318,7 @@ void XE::wrapAlderLakeNSetupWorkLoop(IOService *controller,IOWorkLoop *workLoop)
 		c.pipe[0].memory=r;
 	}
 	if(result.status!=Display13Power::Status::Complete)adlnFault(c.bridge.state.faulted,__LINE__);
+	display13PanelTrace(30,static_cast<uint32_t>(result.status),c.bridge.bootAdopted,display13LinkState());
 	display13FBPowerRecord(record,7,0,result);
 	IOLockUnlock(c.lock);
 	if(result.status!=Display13Power::Status::Complete && adlnIRQOwner(controller))wrapDisplay13FBDisableIRQ(controller);

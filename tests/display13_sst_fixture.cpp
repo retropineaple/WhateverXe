@@ -55,7 +55,9 @@ struct Display13FBSSTIO {
 };
 bool adlnWriterMappingBound(){return bound;}
 uintptr_t display13FBExpectedOwner(void*){return 0;}
+static uint64_t display13LinkState(){return 0;}
 struct XE {
+ static void display13PanelTrace(uint32_t,uint64_t=0,uint64_t=0,uint64_t=0,uint64_t=0,uint64_t=0){}
  bool display13ClockOrderReady=false;
  static bool display13StopTranscoder(void*){assert(false);return false;}
  static bool display13TrainingPath(void*,uint32_t&,uint32_t&){return false;}

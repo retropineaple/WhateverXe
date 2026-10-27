@@ -18,7 +18,8 @@ namespace Display13FBTopology {constexpr unsigned Ports=9;bool selected(void *p,
 static bool display13Offline;static unsigned calls,binds;
 uint32_t native(OSObject *){++calls;return 1;}
 #define FunctionCast(type,fn) fn
-struct XE {bool display13FBTopologyHooksReady=true;void *adlnTopologyController=(void*)1;void *adlnPlatform;Wiring adlnOutputWiring;uint32_t (*orgAlderLakeNPortState)(OSObject*)=native;bool xelpBindProbe(void*){++binds;return true;}static uint32_t wrapAlderLakeNPortState(OSObject*);};
+static uint64_t display13LinkState(){return 0;}
+struct XE {static void display13PanelTrace(uint32_t,uint64_t=0,uint64_t=0,uint64_t=0,uint64_t=0,uint64_t=0){}bool display13FBTopologyHooksReady=true;void *adlnTopologyController=(void*)1;void *adlnPlatform;Wiring adlnOutputWiring;uint32_t (*orgAlderLakeNPortState)(OSObject*)=native;bool xelpBindProbe(void*){++binds;return true;}static uint32_t wrapAlderLakeNPortState(OSObject*);};
 static XE *callbackXE;
 BODY
 int main(){XE x;callbackXE=&x;uint32_t config[3]={3,9,1};x.adlnPlatform=config;OSObject port;auto cp=config;memcpy(port.bytes+0x548,&cp,sizeof(cp));uint32_t connected=4;memcpy(port.bytes+0x554,&connected,4);
