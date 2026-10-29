@@ -14065,6 +14065,19 @@ bool XE::wrapTGLAcceleratorStart(IOService *that, IOService *provider) {
 		if (renderer->unsigned32BitValue() == 0x1080040)
 			that->setProperty("IOVARendererID", 0x1080080, 32);
 	}
+	// -wex-no-multicontext: the donor personality enables its second
+	// (multi-context compute) command streamer. Run compute on the render
+	// engine instead; populateAccelConfig reads this before engine setup.
+	if (checkKernelArgument("-wex-no-multicontext")) {
+		auto dev=OSDynamicCast(OSDictionary,that->getProperty("Development"));
+		auto copy=dev ? OSDictionary::withDictionary(dev) : nullptr;
+		auto zero=OSNumber::withNumber(0ULL,32);
+		const bool set=copy && zero && copy->setObject("EnableMultiContext",zero);
+		if (set) that->setProperty("Development",copy);
+		IORegistryEntry::getRegistryRoot()->setProperty("WEXMultiContextDisabled",set);
+		if (zero) zero->release();
+		if (copy) copy->release();
+	}
 
 	// Big Sur's HEVC decoder requires this registry admission key in addition
 	// to the per-profile capability dictionary. The TGL personality has the
