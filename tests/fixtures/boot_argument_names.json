@@ -139,6 +139,7 @@
   "-wex-adlp-readout": [],
   "-wex-adlp-readout-noaux": [],
   "-wex-adlp-edp": [],
+  "-wex-adlp-gvascaler": [],
   "-wex-adlp-load-only": [],
   "-wex-display13-offline": []
 }

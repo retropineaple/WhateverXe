@@ -13868,6 +13868,15 @@ bool XE::wrapTGLAcceleratorStart(IOService *that, IOService *provider) {
 	    OSDynamicCast(OSDictionary, that->getProperty("IOGVAHEVCDecodeCapabilities")))
 		that->setProperty("IOGVAHEVCDecode", "2");
 
+	// ADL-P: the TGL VA donor never creates its VPHAL VEBOX render component
+	// here (pRender[VEBOX] stays null), so every AppleGVA pixel transfer
+	// faults in the renderer init and its VPP work can hang RCS/BCS. Do not
+	// advertise the hardware scaler; VideoToolbox then converts frames itself
+	// while hardware decode stays enabled.
+	if (callbackXE->xeProfile.mobileDisplay13() && !checkKernelArgument("-wex-adlp-gvascaler") &&
+	    that->getProperty("IOGVAScaler"))
+		that->removeProperty("IOGVAScaler");
+
 	if (!tglBlitScratchSize || (*tglBlitScratchSize!=0xD240 && *tglBlitScratchSize!=0xE000)) {
 		SYSLOG("igfx", "TGL blit scratch parameter mismatch");
 		return false;
