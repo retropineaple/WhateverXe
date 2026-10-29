@@ -61,7 +61,11 @@ bool checkKernelArgument(const char *name) { return args.count(name); }
 #define IOLog(...) ((void)0)
 static bool display13Offline;
 static int kextIntelTGLFb, kextAppleIntelTGLCompat, kextIntelTGL;
-static struct { void onKextLoadForce(int *) {} } lilu;
+static struct { void onKextLoadForce(int *) {} template<class... A> void onProcLoadForce(A...) {} } lilu;
+static int vaPPGuardProc[1],vaPPGuardMod[1];
+#ifndef arrsize
+#define arrsize(a) (sizeof(a)/sizeof((a)[0]))
+#endif
 struct XE {
  XELP::Profile xeProfile;
  bool adlnRequested=false, adlnDetected=false, adlnKernelReady=false, adlnNativeRequested=false, adlsDisplaySelected=false, display12SmallGTDetected=false;

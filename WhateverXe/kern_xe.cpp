@@ -3785,6 +3785,25 @@ extern "C" __attribute__((naked, used)) void tglGuCDMAWriteBridge() {
 		"jmpq *_tglGuCDMAWriteResume(%rip)\n");
 }
 
+// The TGL VA donor's Gen12 VPHAL renderer never allocates its VEBOX render
+// component, yet single-stream pixel processing runs only through it: every
+// GVAVPHALPPCreateContext user (AppleGVA pixel transfer, decoder output
+// conversion) faults in VphalRenderer init or render, and its VPP work can
+// hang RCS/BCS. Take the context's existing "unsupported resolution" exit so
+// AppleGVA refuses at data-path creation and VideoToolbox converts frames
+// itself; hardware decode is unaffected. Lilu patches pages in memory only.
+static const uint8_t vaPPGuardFind[] {0x41,0x8b,0x4e,0x24,0x39,0xc2,0x0f,0x87,0x60,0x06,0x00,0x00,0x39,0xc1,0x0f,0x87,0x58,0x06,0x00,0x00};
+static const uint8_t vaPPGuardRepl[] {0x41,0x8b,0x4e,0x24,0xe9,0x63,0x06,0x00,0x00,0x0f,0x1f,0x00,0x39,0xc1,0x0f,0x87,0x58,0x06,0x00,0x00};
+static UserPatcher::BinaryModPatch vaPPGuardPatch[] {
+    {CPU_TYPE_X86_64,0,vaPPGuardFind,vaPPGuardRepl,sizeof(vaPPGuardFind),0,1,UserPatcher::FileSegment::SegmentTextText,1}
+};
+static UserPatcher::BinaryModInfo vaPPGuardMod[] {
+    {"/Library/GPUBundles/AppleIntelTGLGraphicsVADriver.bundle/Contents/MacOS/AppleIntelTGLGraphicsVADriver",vaPPGuardPatch,arrsize(vaPPGuardPatch)}
+};
+static UserPatcher::ProcInfo vaPPGuardProc[] {
+    {"VTDecoderXPCService",static_cast<uint32_t>(sizeof("VTDecoderXPCService")-1),1,UserPatcher::ProcInfo::MatchSuffix}
+};
+
 void XE::init() {
     callbackXE = this;
     // Register notifications before Lilu closes registration. Actual family
@@ -3792,6 +3811,8 @@ void XE::init() {
     lilu.onKextLoadForce(&kextAppleIntelTGLCompat);
     lilu.onKextLoadForce(&kextIntelTGL);
     lilu.onKextLoadForce(&kextIntelTGLFb);
+    if (checkKernelArgument("-wex-adlp-edp") && !checkKernelArgument("-wex-noppguard"))
+        lilu.onProcLoadForce(vaPPGuardProc,arrsize(vaPPGuardProc),nullptr,nullptr,vaPPGuardMod,arrsize(vaPPGuardMod));
 }
 
 void XE::selectProfile(const XELP::Profile &profile) {
