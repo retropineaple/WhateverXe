@@ -299,10 +299,13 @@ bool tglRecoverySerialize(void *,void *,OSSerialize *serializer) {
 }
 }
 
+static void gpuResetTrace(uint32_t event,const void *object,uint64_t arg,uint64_t result);
 void XE::wrapTGLRecovery(void *channel) {
 	const auto n=__atomic_fetch_add(&tglRecoveryCalls,1,__ATOMIC_RELAXED);
 	uint64_t before {};clock_get_uptime(&before);
+	gpuResetTrace(1,channel,n,0);
 	const auto result=TGLRecovery::resetAndResume(channel);
+	gpuResetTrace(2,channel,n,result.resetOK|(uint64_t(result.failuresAfter)<<8));
 	uint64_t after {};clock_get_uptime(&after);
 	if (n<arrsize(tglRecoveryRecords)) {
 		auto q=tglRecoveryRecords[n];q[0]=123;q[1]=n+1;q[2]=before;q[3]=after;
@@ -11056,6 +11059,103 @@ bool XE::processAlderLakeNTaskBoundary(KernelPatcher &patcher, size_t index, mac
 	return ready;
 }
 
+// -wex-reset-trace: record the donor's GPU hang recovery. Each entry is
+// {mach time, event, result, object, arg, 16 registers}; events are enter/exit
+// pairs of the channel restart, engine reset, scheduler reset/resume and
+// command-streamer reset. The ring is memory-only and serialized on read, so
+// the recovery path never allocates.
+struct GPUResetTraceEntry {uint64_t time;uint32_t event,result;uint64_t object,arg;uint32_t regs[16];};
+static GPUResetTraceEntry gpuResetTraceRing[96];
+static volatile uint32_t gpuResetTraceCount;
+static volatile uint8_t *gpuResetMMIO;
+// GDRST, 4A08, RCS tail/head/start/ctl, IPEHR, INSTDONE, ACTHD, MI_MODE,
+// RESET_CTL, RING_MODE, EXECLIST_STATUS, CSB pointers, EXECLIST_CONTROL,
+// render forcewake ack.
+static const uint32_t gpuResetTraceRegs[16] {0x941C,0x4A08,0x2030,0x2034,0x2038,0x203C,0x2068,0x206C,
+ 0x2074,0x209C,0x20D0,0x229C,0x2234,0x23A0,0x2550,0x0D84};
+static mach_vm_address_t gpuResetOrgEngine,gpuResetOrgScheduler,gpuResetOrgResume;
+static bool gpuResetTraceOn;
+static void gpuResetTrace(uint32_t event,const void *object,uint64_t arg,uint64_t result) {
+ if(!__atomic_load_n(&gpuResetTraceOn,__ATOMIC_ACQUIRE))return;
+ // IGAccelFIFOChannel +0x18 is the accelerator, whose MMIO base is at +0x1240.
+ if(event==1 && object)if(auto owner=*reinterpret_cast<uint8_t *const *>(static_cast<const uint8_t *>(object)+0x18))
+  __atomic_store_n(&gpuResetMMIO,*reinterpret_cast<uint8_t **>(owner+0x1240),__ATOMIC_RELEASE);
+ const auto n=__sync_fetch_and_add(&gpuResetTraceCount,1);
+ auto &e=gpuResetTraceRing[n%arrsize(gpuResetTraceRing)];
+ e.time=mach_absolute_time();e.event=event;e.result=uint32_t(result);
+ e.object=reinterpret_cast<uint64_t>(object);e.arg=arg;
+ auto mmio=__atomic_load_n(&gpuResetMMIO,__ATOMIC_ACQUIRE);
+ for(unsigned i=0;i<arrsize(gpuResetTraceRegs);++i)
+  e.regs[i]=mmio?*reinterpret_cast<volatile uint32_t *>(mmio+gpuResetTraceRegs[i]):0;
+ // The unified log survives the forced restart that usually follows a failed
+ // recovery; the registry copy does not.
+ const auto &v=e.regs;
+ IOLog("WEXReset %u ev=%u res=%x obj=%llx arg=%llx gdrst=%x 4a08=%x tail=%x head=%x start=%x ctl=%x ipehr=%x "
+  "instdone=%x acthd=%x mimode=%x resetctl=%x mode=%x els=%x csb=%x elc=%x fwack=%x\n",n,event,e.result,e.object,arg,
+  v[0],v[1],v[2],v[3],v[4],v[5],v[6],v[7],v[8],v[9],v[10],v[11],v[12],v[13],v[14],v[15]);
+}
+static bool gpuResetTraceSerialize(void *,void *,OSSerialize *serializer) {
+ const auto n=__atomic_load_n(&gpuResetTraceCount,__ATOMIC_ACQUIRE);
+ const auto used=n<arrsize(gpuResetTraceRing)?n:uint32_t(arrsize(gpuResetTraceRing));
+ auto out=OSData::withCapacity(sizeof(uint32_t)+used*sizeof(GPUResetTraceEntry));if(!out)return false;
+ out->appendBytes(&n,sizeof(n));
+ // Oldest first, so the decoder reads events in order after a wrap.
+ for(uint32_t i=n-used;i<n;++i)out->appendBytes(&gpuResetTraceRing[i%arrsize(gpuResetTraceRing)],sizeof(GPUResetTraceEntry));
+ const bool result=out->serialize(serializer);out->release();return result;
+}
+static uint64_t gpuResetEngine(void *ring,void *context) {
+ // IGHardwareRingBuffer: +0x10 accelerator (MMIO at +0x1240), +0x40 engine
+ // index, +0x8B8 per-engine state with reset flags at +0xA4.
+ auto accel=*reinterpret_cast<uint8_t **>(static_cast<uint8_t *>(ring)+0x10);
+ if(accel)__atomic_store_n(&gpuResetMMIO,*reinterpret_cast<uint8_t **>(accel+0x1240),__ATOMIC_RELEASE);
+ const auto engine=*(static_cast<uint8_t *>(ring)+0x40);
+ auto state=*reinterpret_cast<uint8_t **>(static_cast<uint8_t *>(ring)+0x8B8+engine*8);
+ const uint64_t arg=engine|(uint64_t(state?*reinterpret_cast<uint32_t *>(state+0xA4):UINT32_MAX)<<32);
+ gpuResetTrace(3,context,arg,0);
+ auto r=FunctionCast(gpuResetEngine,gpuResetOrgEngine)(ring,context);
+ gpuResetTrace(4,context,arg,r&0xFF);return r;
+}
+static uint64_t gpuResetScheduler(void *scheduler,uint32_t type,void *context) {
+ gpuResetTrace(5,context,type,0);
+ auto r=FunctionCast(gpuResetScheduler,gpuResetOrgScheduler)(scheduler,type,context);
+ gpuResetTrace(6,context,type,r);return r;
+}
+static uint64_t gpuResetResume(void *scheduler) {
+ gpuResetTrace(7,scheduler,0,0);
+ auto r=FunctionCast(gpuResetResume,gpuResetOrgResume)(scheduler);
+ gpuResetTrace(8,scheduler,0,r);return r;
+}
+// The channel restart and the command-streamer reset already have WhateverXe
+// routes (single-pass recovery, CSB12); their wrappers record events 1/2 and
+// 9/10, so only the donor functions nothing else routes are hooked here.
+static bool gpuResetTraceInstall(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size) {
+ static const char *symbols[] {"__ZN20IGHardwareRingBuffer19resetGraphicsEngineEP17IGHardwareContext",
+  "__ZN12IGScheduler515processGPUResetE10IGHwCsTypeP17IGHardwareContext","__ZN12IGScheduler56resumeEv"};
+ static const uintptr_t offsets[] {0x43576,0x380D8,0x3906C};
+ static const uint8_t engine[] {0x55,0x48,0x89,0xE5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xEC,0x18,0x49};
+ static const uint8_t scheduler[] {0x55,0x48,0x89,0xE5,0x89,0xF0,0x48,0x8B,0xBC,0xC7,0xA0,0x0C,0,0,0x5D,0xE9,0xAA,0x22};
+ static const uint8_t resume[] {0x55,0x48,0x89,0xE5,0x41,0x57,0x41,0x56,0x53,0x50,0xC6,0x87,0x88,0x0A,0,0,0,0x4C};
+ static const uint8_t *heads[] {engine,scheduler,resume};
+ bool ready=size>0x43600;
+ for(unsigned i=0;i<arrsize(symbols) && ready;++i)
+  ready=patcher.solveSymbol<mach_vm_address_t>(index,symbols[i],address,size)==address+offsets[i] &&
+   !memcmp(reinterpret_cast<void *>(address+offsets[i]),heads[i],sizeof(engine));
+ patcher.clearError();
+ if(ready) {
+  KernelPatcher::RouteRequest routes[] {{symbols[0],gpuResetEngine,gpuResetOrgEngine},
+   {symbols[1],gpuResetScheduler,gpuResetOrgScheduler},{symbols[2],gpuResetResume,gpuResetOrgResume}};
+  ready=patcher.routeMultiple(index,routes,arrsize(routes),address,size);
+  patcher.clearError();
+ }
+ __atomic_store_n(&gpuResetTraceOn,ready,__ATOMIC_RELEASE);
+ auto root=IORegistryEntry::getRegistryRoot();
+ root->setProperty("WEXGPUResetTraceReady",ready);
+ if(ready)if(auto live=OSSerializer::forTarget(nullptr,gpuResetTraceSerialize)) {
+  root->setProperty("WEXGPUResetTrace",live);live->release();
+ }
+ return ready;
+}
+
 bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size) {
  // Framebuffer-only mode must never enter the donor accelerator probe.
  // The bring-up payload omits this bundle; also reject it if already present.
@@ -11074,6 +11174,7 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
  const bool surfaceABIReady=tglInstallSonomaSurfaceABI(patcher,index,address,size,false);
  IORegistryEntry::getRegistryRoot()->setProperty("TGLSonomaSurfaceAcceleratorReady",surfaceABIReady);
  if(adlnDetected && (checkKernelArgument("-wex-adln-kernel-ctx") || adlnNativeRCSProfileRequested))adlnPrepareRCSProfile(patcher,index,address,size);
+ if(checkKernelArgument("-wex-reset-trace"))gpuResetTraceInstall(patcher,index,address,size);
    // Serialize only the two direct stores in detectEDRAM. The original
    // forcewake and 1000ms sleep remain outside the shared gate.
    {
@@ -14748,8 +14849,10 @@ bool XE::wrapTGLCSBInit(void *streamer,void *owner,void *loop,void *scheduler,un
 }
 void XE::wrapTGLCSBWake(void *streamer) { tglCSBInitialize(streamer); }
 void XE::wrapTGLCSBReset(void *streamer) {
+ gpuResetTrace(9,streamer,0,0);
  tglCSBInitialize(streamer);
  FunctionCast(wrapTGLCSBReset,callbackXE->orgTGLCSBReset)(streamer);
+ gpuResetTrace(10,streamer,0,0);
 }
 void XE::wrapTGLCSBProcess(void *streamer,uint32_t flags) {
  TGLCSBIO io(streamer,flags);auto &engine=tglCSBEngines[io.engine];

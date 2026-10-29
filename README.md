@@ -196,6 +196,7 @@ framebuffer's independent boot-memory and MMIO checks. It does not enable an
 otherwise unsupported display backend.
 
 Temporary development diagnostic: `-wex-adlp-readout` captures ADL-P boot resources while keeping GPU driver admission disabled. It is not required for supported hardware. It also records the firmware-programmed eDP path (transcoder, PPS, backlight, PSR, PLL and Combo PHY A registers), the VBT, and sink DPCD read over an idle AUX A; add `-wex-adlp-readout-noaux` to skip the DPCD reads.
+Temporary development diagnostic: `-wex-reset-trace` records each GPU hang recovery step (channel restart, engine reset, scheduler reset and resume, command-streamer reset) with the render engine's reset and ring registers in the `WEXGPUResetTrace` registry property. It does not change recovery.
 `-wex-adlp-load-only` blocks both native framebuffer and accelerator probes/starts on a selected ADL-P/RPL-P device, for load-only diagnostics without GPU initialization.
 `-wex-display13-offline` keeps native display controller initialization enabled on Alder Lake-N / Twin Lake and Alder Lake-H/P/U / Raptor Lake-H/P/U but reports selected outputs as disconnected, isolating HPD/EDID and mode programming for framebuffer diagnostics. It does not establish display operation.
 
