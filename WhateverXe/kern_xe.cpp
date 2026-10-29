@@ -1,5 +1,6 @@
 #include "kern_display13_color.hpp"
 #include <mach/clock.h>
+#include <kern/thread_call.h>
 //
 //  kern_xe.cpp
 //  WhateverGreen
@@ -11123,6 +11124,37 @@ static const GPUResetRCSRegister gpuResetRCSRegisters[] {{0x229C,true},{0x2080,f
  {0x2054,false},{0x20B4,false},{0x24D0,false},{0x24D4,false},{0x24D8,false},{0x24DC,false},{0x24E0,false},
  {0x24E4,false},{0x24E8,false},{0x24EC,false},{0x24F0,false},{0x24F4,false},{0x24F8,false},{0x24FC,false}};
 static bool gpuResetRestoreOn,gpuResetRCSValid;
+// Stamps whose work was lost in the reset never return, and IOAccel's
+// progress check then signals a restart for them every few seconds with no
+// channel to restart (the GPU work loop stalls each time). Two seconds after a
+// recovery, complete any stamp slot that is still behind its last issued value
+// and has not moved since: {returned +0, issued +8} in 64-byte slots at the
+// ring's +0x30, 64 slots. This fails the lost work instead of waiting forever.
+static uint8_t *volatile gpuResetStampBase;
+static uint32_t gpuResetStampSeen[64];
+static thread_call_t gpuResetStampCall;
+static volatile uint32_t gpuResetStampForced;
+static void gpuResetTrace(uint32_t event,const void *object,uint64_t arg,uint64_t result);
+static void gpuResetStampSweep(thread_call_param_t,thread_call_param_t) {
+ auto base=__atomic_load_n(&gpuResetStampBase,__ATOMIC_ACQUIRE);
+ if(!base)return;
+ uint64_t mask=0;uint32_t forced=0;
+ for(unsigned i=0;i<arrsize(gpuResetStampSeen);++i) {
+  auto slot=reinterpret_cast<volatile uint32_t *>(base+i*64);
+  const uint32_t done=slot[0],issued=slot[2];
+  if(int32_t(issued-done)>0 && done==gpuResetStampSeen[i]) {slot[0]=issued;mask|=1ULL<<i;++forced;}
+ }
+ __atomic_fetch_add(&gpuResetStampForced,forced,__ATOMIC_RELAXED);
+ gpuResetTrace(14,base,mask,forced);
+}
+static void gpuResetStampArm() {
+ auto base=__atomic_load_n(&gpuResetStampBase,__ATOMIC_ACQUIRE);
+ if(!base || !gpuResetStampCall)return;
+ for(unsigned i=0;i<arrsize(gpuResetStampSeen);++i)
+  gpuResetStampSeen[i]=*reinterpret_cast<volatile uint32_t *>(base+i*64);
+ uint64_t deadline;clock_interval_to_deadline(2,kSecondScale,&deadline);
+ thread_call_enter_delayed(gpuResetStampCall,deadline);
+}
 // Before/after copies of the donor hang report's register set, for diffing a
 // recovered engine against its pre-reset state (both taken with forcewake).
 static const uint32_t gpuResetDumpRegs[] {
@@ -11170,6 +11202,7 @@ static void gpuResetDumpAfter(void *channel) {
  auto mmio=accel?*reinterpret_cast<uint8_t **>(accel+0x1240):nullptr;
  if(!mmio)return;
  gpuResetForceWake(accel,true,7);gpuResetDumpTake(mmio,1);gpuResetForceWake(accel,false,7);
+ gpuResetStampArm();
 }
 static uint32_t gpuResetSaveRCS(uint8_t *accel) {
  auto mmio=*reinterpret_cast<uint8_t **>(accel+0x1240);
@@ -11226,6 +11259,8 @@ static uint64_t gpuResetEngine(void *ring,void *context) {
  auto accel=*reinterpret_cast<uint8_t **>(static_cast<uint8_t *>(ring)+0x10);
  if(accel)__atomic_store_n(&gpuResetMMIO,*reinterpret_cast<uint8_t **>(accel+0x1240),__ATOMIC_RELEASE);
  const auto engine=*(static_cast<uint8_t *>(ring)+0x40);
+ if(auto stamps=*reinterpret_cast<uint8_t **>(static_cast<uint8_t *>(ring)+0x30))
+  __atomic_store_n(&gpuResetStampBase,stamps,__ATOMIC_RELEASE);
  auto state=*reinterpret_cast<uint8_t **>(static_cast<uint8_t *>(ring)+0x8B8+engine*8);
  const uint64_t arg=engine|(uint64_t(state?*reinterpret_cast<uint32_t *>(state+0xA4):UINT32_MAX)<<32);
  // Event 12: the ring's own reset MMIO base (+0x50) relative to the
@@ -11286,6 +11321,7 @@ static bool gpuResetTraceInstall(KernelPatcher &patcher,size_t index,mach_vm_add
    gpuResetForceWake=reinterpret_cast<void (*)(void *,bool,unsigned)>(at);
  }
  const bool restore=ready && gpuResetForceWake;
+ if(restore && !gpuResetStampCall)gpuResetStampCall=thread_call_allocate(gpuResetStampSweep,nullptr);
  __atomic_store_n(&gpuResetRestoreOn,restore,__ATOMIC_RELEASE);
  auto root=IORegistryEntry::getRegistryRoot();
  root->setProperty("WEXGPUResetTraceReady",ready);
