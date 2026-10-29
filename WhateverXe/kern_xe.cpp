@@ -11115,7 +11115,11 @@ static bool gpuResetTraceSerialize(void *,void *,OSSerialize *serializer) {
 struct GPUResetRCSRegister {uint32_t reg;bool masked;};
 static const GPUResetRCSRegister gpuResetRCSRegisters[] {{0x229C,true},{0x2080,false},{0x209C,true},{0x20C0,true},
  {0x2090,true},{0x7000,true},{0x7004,true},{0x20E0,true},{0x20E4,true},{0x20EC,true},{0x2580,true},
- {0x7010,true},{0xE194,true},{0x20A0,false},{0x4090,false},{0x9430,false},{0x0D08,false},{0xB004,false}};
+ {0x7010,true},{0xE194,true},{0x20A0,false},{0x4090,false},{0x9430,false},{0x0D08,false},{0xB004,false},
+ // RC_PWRCTX_MAX, EMR and the user-mode register whitelist (FORCE_TO_NONPRIV
+ // 0..11): without it the donor's Metal/VA drivers lose their LRI targets.
+ {0x2054,false},{0x20B4,false},{0x24D0,false},{0x24D4,false},{0x24D8,false},{0x24DC,false},{0x24E0,false},
+ {0x24E4,false},{0x24E8,false},{0x24EC,false},{0x24F0,false},{0x24F4,false},{0x24F8,false},{0x24FC,false}};
 static bool gpuResetRestoreOn,gpuResetRCSValid;
 static void (*gpuResetForceWake)(void *,bool,unsigned);
 static uint32_t gpuResetRCSSaved[arrsize(gpuResetRCSRegisters)];
