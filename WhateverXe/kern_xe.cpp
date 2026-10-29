@@ -11103,6 +11103,63 @@ static bool gpuResetTraceSerialize(void *,void *,OSSerialize *serializer) {
  for(uint32_t i=n-used;i<n;++i)out->appendBytes(&gpuResetTraceRing[i%arrsize(gpuResetTraceRing)],sizeof(GPUResetTraceEntry));
  const bool result=out->serialize(serializer);out->release();return result;
 }
+// -wex-reset-restore: on this GPU the hung work sits on the donor's second
+// ring (0x1A000 block), whose reset uses the render GDRST domain (mask 2) but
+// whose restore list only names its own 0x1A000 registers. The render
+// engine's mode, status-page and chicken registers are therefore cleared and
+// never restored, so execlists stay off and every replay hangs again. Just
+// before a render-domain reset, wake the render domain and save those
+// registers (only from a healthy engine, execlists on); after the GDRST, with
+// the donor's forcewake still held, write them back before work is replayed.
+// Masked registers are rewritten with all enable bits; the rest raw.
+struct GPUResetRCSRegister {uint32_t reg;bool masked;};
+static const GPUResetRCSRegister gpuResetRCSRegisters[] {{0x229C,true},{0x2080,false},{0x209C,true},{0x20C0,true},
+ {0x2090,true},{0x7000,true},{0x7004,true},{0x20E0,true},{0x20E4,true},{0x20EC,true},{0x2580,true},
+ {0x7010,true},{0xE194,true},{0x20A0,false},{0x4090,false},{0x9430,false},{0x0D08,false},{0xB004,false}};
+static bool gpuResetRestoreOn,gpuResetRCSValid;
+static void (*gpuResetForceWake)(void *,bool,unsigned);
+static uint32_t gpuResetRCSSaved[arrsize(gpuResetRCSRegisters)];
+static volatile uint32_t gpuResetSnapshots,gpuResetRestores;
+static uint32_t gpuResetSaveRCS(uint8_t *accel) {
+ auto mmio=*reinterpret_cast<uint8_t **>(accel+0x1240);
+ if(!mmio || !gpuResetForceWake)return 0;
+ gpuResetForceWake(accel,true,7);
+ uint32_t values[arrsize(gpuResetRCSRegisters)];
+ for(unsigned i=0;i<arrsize(values);++i)values[i]=*reinterpret_cast<volatile uint32_t *>(mmio+gpuResetRCSRegisters[i].reg);
+ gpuResetForceWake(accel,false,7);
+ // RING_MODE bit 3 (legacy ring disabled = execlists) marks a healthy engine;
+ // keep the last healthy copy across back-to-back failed recoveries.
+ if(values[0]!=UINT32_MAX && (values[0]&8) && values[1]) {
+  memcpy(gpuResetRCSSaved,values,sizeof(values));
+  __atomic_store_n(&gpuResetRCSValid,true,__ATOMIC_RELEASE);
+  __atomic_fetch_add(&gpuResetSnapshots,1,__ATOMIC_RELAXED);
+ }
+ return values[0];
+}
+static uint32_t gpuResetRestoreRCS(void *scheduler) {
+ auto accel=*reinterpret_cast<uint8_t **>(static_cast<uint8_t *>(scheduler)+0x10);
+ if(!accel || !__atomic_load_n(&gpuResetRCSValid,__ATOMIC_ACQUIRE))return 0;
+ auto mmio=*reinterpret_cast<uint8_t **>(accel+0x1240);
+ if(!mmio)return 0;
+ for(unsigned i=0;i<arrsize(gpuResetRCSRegisters);++i) {
+  const auto value=gpuResetRCSSaved[i];
+  *reinterpret_cast<volatile uint32_t *>(mmio+gpuResetRCSRegisters[i].reg)=
+   gpuResetRCSRegisters[i].masked?0xFFFF0000|(value&0xFFFF):value;
+ }
+ __atomic_fetch_add(&gpuResetRestores,1,__ATOMIC_RELAXED);
+ return *reinterpret_cast<volatile uint32_t *>(mmio+0x229C);
+}
+static bool gpuResetDefaultsSerialize(void *,void *,OSSerialize *serializer) {
+ uint32_t data[3+2*arrsize(gpuResetRCSRegisters)] {};
+ data[0]=__atomic_load_n(&gpuResetRestores,__ATOMIC_ACQUIRE);
+ data[1]=__atomic_load_n(&gpuResetSnapshots,__ATOMIC_ACQUIRE);
+ data[2]=__atomic_load_n(&gpuResetRCSValid,__ATOMIC_ACQUIRE);
+ for(unsigned i=0;i<arrsize(gpuResetRCSRegisters);++i) {
+  data[3+i*2]=gpuResetRCSRegisters[i].reg|(gpuResetRCSRegisters[i].masked?0x80000000U:0);data[4+i*2]=gpuResetRCSSaved[i];
+ }
+ auto out=OSData::withBytes(data,sizeof(data));if(!out)return false;
+ const bool result=out->serialize(serializer);out->release();return result;
+}
 static uint64_t gpuResetEngine(void *ring,void *context) {
  // IGHardwareRingBuffer: +0x10 accelerator (MMIO at +0x1240), +0x40 engine
  // index, +0x8B8 per-engine state with reset flags at +0xA4.
@@ -11111,12 +11168,25 @@ static uint64_t gpuResetEngine(void *ring,void *context) {
  const auto engine=*(static_cast<uint8_t *>(ring)+0x40);
  auto state=*reinterpret_cast<uint8_t **>(static_cast<uint8_t *>(ring)+0x8B8+engine*8);
  const uint64_t arg=engine|(uint64_t(state?*reinterpret_cast<uint32_t *>(state+0xA4):UINT32_MAX)<<32);
+ // Event 12: the ring's own reset MMIO base (+0x50) relative to the
+ // accelerator's, its GDRST mask (+0x70) and restore-list length.
+ if(accel) {
+  auto restore=*reinterpret_cast<uint64_t **>(static_cast<uint8_t *>(ring)+0x78);
+  gpuResetTrace(12,ring,*reinterpret_cast<uint64_t *>(static_cast<uint8_t *>(ring)+0x50)-
+   *reinterpret_cast<uint64_t *>(accel+0x1240),
+   *reinterpret_cast<uint32_t *>(static_cast<uint8_t *>(ring)+0x70)|(uint64_t(restore?*restore:0)<<24));
+ }
  gpuResetTrace(3,context,arg,0);
+ if(accel && __atomic_load_n(&gpuResetRestoreOn,__ATOMIC_ACQUIRE) &&
+    (*reinterpret_cast<uint32_t *>(static_cast<uint8_t *>(ring)+0x70)&2))
+  gpuResetTrace(13,context,arg,gpuResetSaveRCS(accel));
  auto r=FunctionCast(gpuResetEngine,gpuResetOrgEngine)(ring,context);
  gpuResetTrace(4,context,arg,r&0xFF);return r;
 }
 static uint64_t gpuResetScheduler(void *scheduler,uint32_t type,void *context) {
  gpuResetTrace(5,context,type,0);
+ if(__atomic_load_n(&gpuResetRestoreOn,__ATOMIC_ACQUIRE))
+  gpuResetTrace(11,context,type,gpuResetRestoreRCS(scheduler));
  auto r=FunctionCast(gpuResetScheduler,gpuResetOrgScheduler)(scheduler,type,context);
  gpuResetTrace(6,context,type,r);return r;
 }
@@ -11148,10 +11218,23 @@ static bool gpuResetTraceInstall(KernelPatcher &patcher,size_t index,mach_vm_add
   patcher.clearError();
  }
  __atomic_store_n(&gpuResetTraceOn,ready,__ATOMIC_RELEASE);
+ if(ready && checkKernelArgument("-wex-reset-restore")) {
+  static const uint8_t wake[] {0x55,0x48,0x89,0xE5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x50};
+  auto at=patcher.solveSymbol<mach_vm_address_t>(index,"__ZN16IntelAccelerator13SafeForceWakeEbj",address,size);
+  patcher.clearError();
+  if(at==address+0x28C2A && !memcmp(reinterpret_cast<void *>(at),wake,sizeof(wake)))
+   gpuResetForceWake=reinterpret_cast<void (*)(void *,bool,unsigned)>(at);
+ }
+ const bool restore=ready && gpuResetForceWake;
+ __atomic_store_n(&gpuResetRestoreOn,restore,__ATOMIC_RELEASE);
  auto root=IORegistryEntry::getRegistryRoot();
  root->setProperty("WEXGPUResetTraceReady",ready);
+ root->setProperty("WEXGPUResetRestoreReady",restore);
  if(ready)if(auto live=OSSerializer::forTarget(nullptr,gpuResetTraceSerialize)) {
   root->setProperty("WEXGPUResetTrace",live);live->release();
+ }
+ if(restore)if(auto live=OSSerializer::forTarget(nullptr,gpuResetDefaultsSerialize)) {
+  root->setProperty("WEXGPUResetDefaults",live);live->release();
  }
  return ready;
 }
@@ -11174,7 +11257,8 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
  const bool surfaceABIReady=tglInstallSonomaSurfaceABI(patcher,index,address,size,false);
  IORegistryEntry::getRegistryRoot()->setProperty("TGLSonomaSurfaceAcceleratorReady",surfaceABIReady);
  if(adlnDetected && (checkKernelArgument("-wex-adln-kernel-ctx") || adlnNativeRCSProfileRequested))adlnPrepareRCSProfile(patcher,index,address,size);
- if(checkKernelArgument("-wex-reset-trace"))gpuResetTraceInstall(patcher,index,address,size);
+ if(checkKernelArgument("-wex-reset-trace") || checkKernelArgument("-wex-reset-restore"))
+  gpuResetTraceInstall(patcher,index,address,size);
    // Serialize only the two direct stores in detectEDRAM. The original
    // forcewake and 1000ms sleep remain outside the shared gate.
    {
