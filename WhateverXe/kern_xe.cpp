@@ -300,12 +300,14 @@ bool tglRecoverySerialize(void *,void *,OSSerialize *serializer) {
 }
 
 static void gpuResetTrace(uint32_t event,const void *object,uint64_t arg,uint64_t result);
+static void gpuResetDumpAfter(void *channel);
 void XE::wrapTGLRecovery(void *channel) {
 	const auto n=__atomic_fetch_add(&tglRecoveryCalls,1,__ATOMIC_RELAXED);
 	uint64_t before {};clock_get_uptime(&before);
 	gpuResetTrace(1,channel,n,0);
 	const auto result=TGLRecovery::resetAndResume(channel);
 	gpuResetTrace(2,channel,n,result.resetOK|(uint64_t(result.failuresAfter)<<8));
+	gpuResetDumpAfter(channel);
 	uint64_t after {};clock_get_uptime(&after);
 	if (n<arrsize(tglRecoveryRecords)) {
 		auto q=tglRecoveryRecords[n];q[0]=123;q[1]=n+1;q[2]=before;q[3]=after;
@@ -11121,15 +11123,59 @@ static const GPUResetRCSRegister gpuResetRCSRegisters[] {{0x229C,true},{0x2080,f
  {0x2054,false},{0x20B4,false},{0x24D0,false},{0x24D4,false},{0x24D8,false},{0x24DC,false},{0x24E0,false},
  {0x24E4,false},{0x24E8,false},{0x24EC,false},{0x24F0,false},{0x24F4,false},{0x24F8,false},{0x24FC,false}};
 static bool gpuResetRestoreOn,gpuResetRCSValid;
+// Before/after copies of the donor hang report's register set, for diffing a
+// recovered engine against its pre-reset state (both taken with forcewake).
+static const uint32_t gpuResetDumpRegs[] {
+ 0x2028,0x2030,0x2034,0x2038,0x203C,0x2050,0x2054,0x2068,0x206C,0x2070,0x2074,0x2078,
+ 0x207C,0x2084,0x208C,0x2090,0x2094,0x2098,0x209C,0x20B0,0x20B4,0x20B8,0x20C0,0x20C4,
+ 0x20D0,0x20E0,0x20E4,0x2110,0x2134,0x2140,0x2148,0x2168,0x2178,0x217C,0x2180,0x2190,
+ 0x21A0,0x21A4,0x21B0,0x21D0,0x2200,0x2204,0x2208,0x220C,0x2210,0x222C,0x2234,0x223C,
+ 0x2244,0x2248,0x2250,0x2260,0x2270,0x2274,0x2278,0x227C,0x2280,0x2284,0x2288,0x228C,
+ 0x229C,0x22E0,0x2360,0x2364,0x2368,0x2370,0x2374,0x2378,0x237C,0x2380,0x2384,0x2388,
+ 0x238C,0x2390,0x2394,0x2398,0x239C,0x23A0,0x23A4,0x23A8,0x23AC,0x23B0,0x2400,0x2408,
+ 0x2410,0x2418,0x2420,0x2430,0x2434,0x2438,0x243C,0x2440,0x2450,0x2470,0x24D0,0x24D4,
+ 0x24D8,0x24DC,0x24E0,0x24EC,0x24F0,0x24F4,0x24F8,0x24FC,0x27F0,0x4030,0x4040,0x4044,
+ 0x4050,0x4090,0x4204,0x4510,0x4580,0x4700,0x4704,0x4708,0x470C,0x4780,0x4784,0x4788,
+ 0x478C,0x4790,0x4794,0x4798,0x479C,0x7000,0x7004,0x7008,0x7010,0x7014,0x7020,0x7100,
+ 0x8000,0x9030,0x9034,0x9070,0x91B8,0x91BC,0x91C0,0x91C4,0x91C8,0x91CC,0x9400,0x9404,
+ 0x9408,0x940C,0x9410,0x9414,0x9418,0x941C,0x9420,0x9424,0x9870,0x9874,0x9878,0xCEC4,
+ 0xE404,0xE408,0xE40C,0xE410,0xE428,0xE4B0,0xE4B4,0x12400,0x12404,0x12408,0x1240C,0x12410,
+ 0x12414,0x12418,0x1241C,0x12420,0x12424,0x12428,0x1242C,0x12430,0x12434,0x12438,0x1243C,0x12440,
+ 0x12444,0x14040,0x14050,0x14090,0x140A0,0x14700,0x14704,0x14708,0x1470C,0x14780,0x14784,0x14788,
+ 0x1478C,0x14790,0x14794,0x14798,0x1479C,0x18030,0x18034,0x18038,0x1803C,0x1806C,0x22028,0x22030,
+ 0x22034,0x22038,0x2203C,0x22050,0x22054,0x22064,0x22068,0x2206C,0x22074,0x22078,0x22080,0x22094,
+ 0x22098,0x2209C,0x220A0,0x220B0,0x220B4,0x220B8,0x220C0,0x220D0,0x22134,0x22140,0x22190,0x22198,
+ 0x221D0,0x22200,0x22270,0x22274,0x22278,0x2227C,0x22280,0x22284,0x22288,0x2228C,0x2229C,0x22358,
+ 0x24000,0x24094,0x24700,0x24708,0x24780,0x24784,0x24788,0x2478C,0x72204,0x731AC,0x73204,0x190030,
+ 0x190038,0x190090,0x1900A0,0x1900E8,0x1C0030,0x1C0034,0x1C0038,0x1C003C,0x1C0050,0x1C0054,0x1C0064,0x1C0068,
+ 0x1C006C,0x1C0074,0x1C0078,0x1C0080,0x1C0094,0x1C0098,0x1C009C,0x1C00A0,0x1C00A8,0x1C00B0,0x1C00B4,0x1C00B8,
+ 0x1C00C0,0x1C00D0,0x1C0110,0x1C0114,0x1C0140,0x1C0178,0x1C017C,0x1C0190,0x1C0198,0x1C01D0,0x1C0270,0x1C0274,
+ 0x1C0278,0x1C027C,0x1C0280,0x1C0284,0x1C0288,0x1C028C,0x1C0358};
+static uint32_t gpuResetDump[2][arrsize(gpuResetDumpRegs)];
+static volatile uint32_t gpuResetDumpCount[2];
 static void (*gpuResetForceWake)(void *,bool,unsigned);
 static uint32_t gpuResetRCSSaved[arrsize(gpuResetRCSRegisters)];
 static volatile uint32_t gpuResetSnapshots,gpuResetRestores;
+static void gpuResetDumpTake(uint8_t *mmio,unsigned which) {
+ for(unsigned i=0;i<arrsize(gpuResetDumpRegs);++i)
+  gpuResetDump[which][i]=*reinterpret_cast<volatile uint32_t *>(mmio+gpuResetDumpRegs[i]);
+ __atomic_fetch_add(&gpuResetDumpCount[which],1,__ATOMIC_RELEASE);
+}
+// Called after a whole recovery returns: wake, copy, release.
+static void gpuResetDumpAfter(void *channel) {
+ if(!__atomic_load_n(&gpuResetRestoreOn,__ATOMIC_ACQUIRE) || !gpuResetForceWake || !channel)return;
+ auto accel=*reinterpret_cast<uint8_t **>(static_cast<uint8_t *>(channel)+0x18);
+ auto mmio=accel?*reinterpret_cast<uint8_t **>(accel+0x1240):nullptr;
+ if(!mmio)return;
+ gpuResetForceWake(accel,true,7);gpuResetDumpTake(mmio,1);gpuResetForceWake(accel,false,7);
+}
 static uint32_t gpuResetSaveRCS(uint8_t *accel) {
  auto mmio=*reinterpret_cast<uint8_t **>(accel+0x1240);
  if(!mmio || !gpuResetForceWake)return 0;
  gpuResetForceWake(accel,true,7);
  uint32_t values[arrsize(gpuResetRCSRegisters)];
  for(unsigned i=0;i<arrsize(values);++i)values[i]=*reinterpret_cast<volatile uint32_t *>(mmio+gpuResetRCSRegisters[i].reg);
+ if(values[0]&8)gpuResetDumpTake(mmio,0);
  gpuResetForceWake(accel,false,7);
  // RING_MODE bit 3 (legacy ring disabled = execlists) marks a healthy engine;
  // keep the last healthy copy across back-to-back failed recoveries.
@@ -11152,6 +11198,14 @@ static uint32_t gpuResetRestoreRCS(void *scheduler) {
  }
  __atomic_fetch_add(&gpuResetRestores,1,__ATOMIC_RELAXED);
  return *reinterpret_cast<volatile uint32_t *>(mmio+0x229C);
+}
+static bool gpuResetDumpSerialize(void *,void *,OSSerialize *serializer) {
+ uint32_t head[3] {uint32_t(arrsize(gpuResetDumpRegs)),__atomic_load_n(&gpuResetDumpCount[0],__ATOMIC_ACQUIRE),
+  __atomic_load_n(&gpuResetDumpCount[1],__ATOMIC_ACQUIRE)};
+ auto out=OSData::withCapacity(sizeof(head)+sizeof(gpuResetDumpRegs)+sizeof(gpuResetDump));if(!out)return false;
+ out->appendBytes(head,sizeof(head));out->appendBytes(gpuResetDumpRegs,sizeof(gpuResetDumpRegs));
+ out->appendBytes(gpuResetDump,sizeof(gpuResetDump));
+ const bool result=out->serialize(serializer);out->release();return result;
 }
 static bool gpuResetDefaultsSerialize(void *,void *,OSSerialize *serializer) {
  uint32_t data[3+2*arrsize(gpuResetRCSRegisters)] {};
@@ -11239,6 +11293,9 @@ static bool gpuResetTraceInstall(KernelPatcher &patcher,size_t index,mach_vm_add
  }
  if(restore)if(auto live=OSSerializer::forTarget(nullptr,gpuResetDefaultsSerialize)) {
   root->setProperty("WEXGPUResetDefaults",live);live->release();
+ }
+ if(restore)if(auto live=OSSerializer::forTarget(nullptr,gpuResetDumpSerialize)) {
+  root->setProperty("WEXGPUResetDump",live);live->release();
  }
  return ready;
 }
