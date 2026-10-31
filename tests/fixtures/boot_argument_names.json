@@ -140,7 +140,6 @@
   "-wex-adlp-readout-noaux": [],
   "-wex-adlp-edp": [],
   "-wex-no-multicontext": [],
-  "-wex-noppguard": [],
   "-wex-reset-restore": [],
   "-wex-reset-trace": [],
   "-wex-scanout-coherent": [],

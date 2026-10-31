@@ -61,8 +61,7 @@ bool checkKernelArgument(const char *name) { return args.count(name); }
 #define IOLog(...) ((void)0)
 static bool display13Offline;
 static int kextIntelTGLFb, kextAppleIntelTGLCompat, kextIntelTGL;
-static struct { void onKextLoadForce(int *) {} template<class... A> void onProcLoadForce(A...) {} } lilu;
-static int vaPPGuardProc[1],vaPPGuardMod[1];
+static struct { void onKextLoadForce(int *) {} } lilu;
 #ifndef arrsize
 #define arrsize(a) (sizeof(a)/sizeof((a)[0]))
 #endif
