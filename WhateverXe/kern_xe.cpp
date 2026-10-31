@@ -11470,10 +11470,11 @@ static bool gpuResetTraceInstall(KernelPatcher &patcher,size_t index,mach_vm_add
 // whatever the LLC had not written back yet. Treat a storage resource that
 // has been flipped as displayable.
 static void *(*scanoutGetStorage)(void *);
-static mach_vm_address_t scanoutOrgFlip,scanoutOrgDisplayable;
+static void *(*scanoutPlaneResource)(void *,uint32_t,uint32_t);
+static mach_vm_address_t scanoutOrgFlip,scanoutOrgDisplayable,scanoutOrgTransaction;
 static void *scanoutRing[16];
 static volatile uint32_t scanoutNext;
-static volatile uint64_t scanoutFlips,scanoutUpgrades;
+static volatile uint64_t scanoutFlips,scanoutUpgrades,scanoutTransactions;
 static void scanoutRecord(void *resource) {
  if(!resource)return;
  auto storage=scanoutGetStorage(resource);if(!storage)return;
@@ -11485,6 +11486,13 @@ static uint64_t scanoutGenerateFlip(void *pipe,void *event,uint32_t index,void *
  __atomic_fetch_add(&scanoutFlips,1,__ATOMIC_RELAXED);
  scanoutRecord(left);scanoutRecord(right);
  return FunctionCast(scanoutGenerateFlip,scanoutOrgFlip)(pipe,event,index,left,right);
+}
+// WindowServer's flips arrive as IOAccelDisplayPipeTransaction2s, not
+// generateFlip. validateTransaction reads planes 0 and 1, eye 0.
+static uint64_t scanoutPerformTransaction(void *pipe,void *transaction) {
+ __atomic_fetch_add(&scanoutTransactions,1,__ATOMIC_RELAXED);
+ if(transaction)for(uint32_t plane=0;plane<2;++plane)scanoutRecord(scanoutPlaneResource(transaction,plane,0));
+ return FunctionCast(scanoutPerformTransaction,scanoutOrgTransaction)(pipe,transaction);
 }
 // Replaces IGAccelResource::isDisplayableIOSurface entirely (storage+0x1CB bit 3);
 // its original starts with a relative call, so the trampoline is never used.
@@ -11498,7 +11506,7 @@ static bool scanoutDisplayable(void *resource) {
 }
 static bool scanoutSerialize(void *,void *,OSSerialize *serializer) {
  uint64_t r[] {1,__atomic_load_n(&scanoutFlips,__ATOMIC_RELAXED),__atomic_load_n(&scanoutUpgrades,__ATOMIC_RELAXED),
-  __atomic_load_n(&scanoutNext,__ATOMIC_RELAXED)};
+  __atomic_load_n(&scanoutNext,__ATOMIC_RELAXED),__atomic_load_n(&scanoutTransactions,__ATOMIC_RELAXED)};
  auto out=OSData::withBytes(r,sizeof(r));if(!out)return false;
  const bool result=out->serialize(serializer);out->release();return result;
 }
@@ -11506,19 +11514,28 @@ static bool scanoutCoherentInstall(KernelPatcher &patcher,size_t index,mach_vm_a
  static const uint8_t displayHead[] {0x55,0x48,0x89,0xE5,0xE8};
  static const uint8_t displayTail[] {0x8A,0x80,0xCB,0x01,0,0,0x24,0x08,0xC0,0xE8,0x03,0x5D,0xC3};
  static const uint8_t flipHead[] {0x55,0x48,0x89,0xE5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xEC,0x58};
+ static const uint8_t transactionHead[] {0x55,0x48,0x89,0xE5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xEC,0x58,0x01,0,0};
  const char *display="__ZN15IGAccelResource22isDisplayableIOSurfaceEv";
  const char *flip="__ZN18IGAccelDisplayPipe12generateFlipEP12IOAccelEventjP16IOAccelResource2S3_";
+ const char *transaction="__ZN18IGAccelDisplayPipe18performTransactionEP30IOAccelDisplayPipeTransaction2";
  bool ready=size>0x7FB80 &&
   patcher.solveSymbol<mach_vm_address_t>(index,display,address,size)==address+0x751D6 &&
-  patcher.solveSymbol<mach_vm_address_t>(index,flip,address,size)==address+0x7FB6E;
+  patcher.solveSymbol<mach_vm_address_t>(index,flip,address,size)==address+0x7FB6E &&
+  patcher.solveSymbol<mach_vm_address_t>(index,transaction,address,size)==address+0x80EF0;
  patcher.clearError();
  const auto at=reinterpret_cast<const uint8_t *>(address+0x751D6);
  ready=ready && !memcmp(at,displayHead,sizeof(displayHead)) && !memcmp(at+9,displayTail,sizeof(displayTail)) &&
-  !memcmp(reinterpret_cast<const void *>(address+0x7FB6E),flipHead,sizeof(flipHead));
+  !memcmp(reinterpret_cast<const void *>(address+0x7FB6E),flipHead,sizeof(flipHead)) &&
+  !memcmp(reinterpret_cast<const void *>(address+0x80EF0),transactionHead,sizeof(transactionHead)) &&
+  *reinterpret_cast<const uint8_t *>(address+0x8107E)==0xE8;
  if(ready) {
   int32_t rel;memcpy(&rel,at+5,sizeof(rel));
   scanoutGetStorage=reinterpret_cast<void *(*)(void *)>(address+0x751D6+9+int64_t(rel));
-  KernelPatcher::RouteRequest routes[] {{flip,scanoutGenerateFlip,scanoutOrgFlip},{display,scanoutDisplayable,scanoutOrgDisplayable}};
+  // performTransaction's own getPlaneResource(plane,eye) call.
+  memcpy(&rel,reinterpret_cast<const uint8_t *>(address+0x8107F),sizeof(rel));
+  scanoutPlaneResource=reinterpret_cast<void *(*)(void *,uint32_t,uint32_t)>(address+0x81083+int64_t(rel));
+  KernelPatcher::RouteRequest routes[] {{flip,scanoutGenerateFlip,scanoutOrgFlip},{display,scanoutDisplayable,scanoutOrgDisplayable},
+   {transaction,scanoutPerformTransaction,scanoutOrgTransaction}};
   ready=patcher.routeMultiple(index,routes,arrsize(routes),address,size);
   patcher.clearError();
  }
