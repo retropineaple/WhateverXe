@@ -10339,6 +10339,21 @@ void XE::wrapAlderLakeNPlanarDBUFWrite(void *access,uint64_t reg,uint32_t value)
 	uint64_t record[14] {2,reg,value};auto status=Display13DBUF::Status::Unavailable;
 	auto path=Display13FBMemory::singlePath<OSObject *>(fb);
 	auto plane=path && path->getMetaClass()->getClassSize()>=0x3730 ? Display13FBMemory::field<OSObject *>(path,0x32C8) : nullptr;
+	// -wex-adlp-edp: this donor helper also writes the initial RGB allocation,
+	// split a third/two thirds as for planar YUV. On the single panel pipe a
+	// pipe-scaled RGB mode (looks-like 1600x1000, a 3200-wide primary) keeps
+	// that third and underruns whenever memory is busy. Give the RGB primary
+	// the single-pipe layout that setupDBUF programs instead.
+	if(callbackXE->display13PanelDP && pipe==0 && plane && plane->getMetaClass()->getClassSize()>=0x1C8 &&
+	   !Display13FBTopology::multiOutputWiring(callbackXE->adlnOutputWiring) &&
+	   Display13WM::supportedRGBControl(Display13FBMemory::field<uint32_t>(plane,0x100)) &&
+	   Display13FBMemory::field<uint32_t>(plane,0x10C)==value) {
+		const auto wanted=Display13DBUF::hardwareRaw(c.dbuf,pipe,{40,2048});
+		if(wanted && wanted!=value) {
+			record[2]=value|(uint64_t(wanted)<<32);
+			*reinterpret_cast<uint32_t *>(reinterpret_cast<uint8_t *>(plane)+0x10C)=wanted;value=wanted;
+		}
+	}
 	const auto binding=adlnInspectPathBinding(fb,path,callbackXE->adlnPlatform,callbackXE->adlnOutputWiring);
 	const bool associated=plane && binding.status==TGLFBBinding::Status::Complete && binding.pipe==pipe &&
 		Display13FBMemory::boundPipe(c.pipe,fb)==pipe && Display13FBMemory::field<void *>(plane,0x90)==access && access==c.access &&
