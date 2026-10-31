@@ -11162,6 +11162,33 @@ static void gpuResetStampArm() {
  uint64_t deadline;clock_interval_to_deadline(2,kSecondScale,&deadline);
  thread_call_enter_delayed(gpuResetStampCall,deadline);
 }
+// A waiter that times out on a stamp lost in an earlier reset (for example a
+// command queue being torn down) otherwise waits forever: the engine is idle,
+// not hung, so IOAccel's eventTimeout never restarts anything, and the waiter
+// holds locks WindowServer needs. After a recovery this boot, complete a stamp
+// that is still behind its last issued value and has not moved across three
+// consecutive timeouts on it.
+static volatile uint32_t gpuResetSnapshots,gpuResetRestores;
+static mach_vm_address_t gpuResetOrgEventTimeout;
+static uint32_t gpuResetTimeoutSeen[64];
+static uint8_t gpuResetTimeoutStrikes[64];
+static uint64_t gpuResetEventTimeout(void *machine,int index) {
+ auto base=__atomic_load_n(&gpuResetStampBase,__ATOMIC_ACQUIRE);
+ if(base && index>=0 && index<int(arrsize(gpuResetTimeoutSeen)) &&
+    __atomic_load_n(&gpuResetRestores,__ATOMIC_ACQUIRE)) {
+  auto slot=reinterpret_cast<volatile uint32_t *>(base+index*64);
+  const uint32_t done=slot[0],issued=slot[2];
+  if(int32_t(issued-done)<=0) gpuResetTimeoutStrikes[index]=0;
+  else if(done!=gpuResetTimeoutSeen[index] || !gpuResetTimeoutStrikes[index]) {
+   gpuResetTimeoutSeen[index]=done;gpuResetTimeoutStrikes[index]=1;
+  } else if(++gpuResetTimeoutStrikes[index]>=3) {
+   slot[0]=issued;gpuResetTimeoutStrikes[index]=0;
+   __atomic_fetch_add(&gpuResetStampForced,1,__ATOMIC_RELAXED);
+   gpuResetTrace(15,machine,uint64_t(uint32_t(index))|(uint64_t(done)<<32),issued);
+  }
+ }
+ return FunctionCast(gpuResetEventTimeout,gpuResetOrgEventTimeout)(machine,index);
+}
 // Before/after copies of the donor hang report's register set, for diffing a
 // recovered engine against its pre-reset state (both taken with forcewake).
 static const uint32_t gpuResetDumpRegs[] {
@@ -11247,7 +11274,6 @@ static uint32_t gpuResetDump[2][arrsize(gpuResetDumpRegs)];
 static volatile uint32_t gpuResetDumpCount[2];
 static void (*gpuResetForceWake)(void *,bool,unsigned);
 static uint32_t gpuResetRCSSaved[arrsize(gpuResetRCSRegisters)];
-static volatile uint32_t gpuResetSnapshots,gpuResetRestores;
 static void gpuResetDumpTake(uint8_t *mmio,unsigned which) {
  for(unsigned i=0;i<arrsize(gpuResetDumpRegs);++i)
   gpuResetDump[which][i]=*reinterpret_cast<volatile uint32_t *>(mmio+gpuResetDumpRegs[i]);
@@ -11392,6 +11418,19 @@ static bool gpuResetTraceInstall(KernelPatcher &patcher,size_t index,mach_vm_add
  }
  const bool restore=ready && gpuResetForceWake;
  if(restore && !gpuResetStampCall)gpuResetStampCall=thread_call_allocate(gpuResetStampSweep,nullptr);
+ if(restore) {
+  // IGAccelEventMachine::eventTimeout(int): exact donor entry, no other route.
+  static const uint8_t timeout[] {0x55,0x48,0x89,0xE5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xEC,0x18};
+  const char *symbol="__ZN19IGAccelEventMachine12eventTimeoutEi";
+  bool timeoutReady=patcher.solveSymbol<mach_vm_address_t>(index,symbol,address,size)==address+0x15F22 &&
+   !memcmp(reinterpret_cast<void *>(address+0x15F22),timeout,sizeof(timeout));
+  patcher.clearError();
+  if(timeoutReady) {
+   KernelPatcher::RouteRequest route {symbol,gpuResetEventTimeout,gpuResetOrgEventTimeout};
+   timeoutReady=patcher.routeMultiple(index,&route,1,address,size);patcher.clearError();
+  }
+  IORegistryEntry::getRegistryRoot()->setProperty("WEXGPUResetEventTimeoutReady",timeoutReady);
+ }
  __atomic_store_n(&gpuResetRestoreOn,restore,__ATOMIC_RELEASE);
  auto root=IORegistryEntry::getRegistryRoot();
  root->setProperty("WEXGPUResetTraceReady",ready);
