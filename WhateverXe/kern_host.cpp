@@ -27,7 +27,10 @@ void XeHost::init() {
  xe.init();
  XeDataAccess::init();
 }
+void xePmInstall(KernelPatcher &patcher);
 void XeHost::processKernel(KernelPatcher &patcher) {
+ // XE-PM (kern_xepm.cpp, -wex-pm) first: DeviceInfo::create can block.
+ xePmInstall(patcher);
  auto info=DeviceInfo::create();if(!info)return;
  auto gpu=OSDynamicCast(IOPCIDevice,info->videoBuiltin);
  // Match WEG ordering: PCI config reads require a published IOPCIDevice.
