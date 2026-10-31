@@ -11462,6 +11462,72 @@ static bool gpuResetTraceInstall(KernelPatcher &patcher,size_t index,mach_vm_add
  return ready;
 }
 
+// -wex-scanout-coherent: surfaceStateFillMemoryObjectControlState gives a
+// displayable IOSurface a MOCS that does not keep its writes in the LLC; the
+// display engine reads memory without snooping the LLC. WindowServer's
+// backing for a downscaled HiDPI mode (larger than the panel) is not marked
+// displayable but is still flipped to the plane, so the display showed
+// whatever the LLC had not written back yet. Treat a storage resource that
+// has been flipped as displayable.
+static void *(*scanoutGetStorage)(void *);
+static mach_vm_address_t scanoutOrgFlip,scanoutOrgDisplayable;
+static void *scanoutRing[16];
+static volatile uint32_t scanoutNext;
+static volatile uint64_t scanoutFlips,scanoutUpgrades;
+static void scanoutRecord(void *resource) {
+ if(!resource)return;
+ auto storage=scanoutGetStorage(resource);if(!storage)return;
+ for(auto entry:scanoutRing)if(__atomic_load_n(&entry,__ATOMIC_RELAXED)==storage)return;
+ const auto i=__atomic_fetch_add(&scanoutNext,1,__ATOMIC_RELAXED)%arrsize(scanoutRing);
+ __atomic_store_n(&scanoutRing[i],storage,__ATOMIC_RELEASE);
+}
+static uint64_t scanoutGenerateFlip(void *pipe,void *event,uint32_t index,void *left,void *right) {
+ __atomic_fetch_add(&scanoutFlips,1,__ATOMIC_RELAXED);
+ scanoutRecord(left);scanoutRecord(right);
+ return FunctionCast(scanoutGenerateFlip,scanoutOrgFlip)(pipe,event,index,left,right);
+}
+// Replaces IGAccelResource::isDisplayableIOSurface entirely (storage+0x1CB bit 3);
+// its original starts with a relative call, so the trampoline is never used.
+static bool scanoutDisplayable(void *resource) {
+ auto storage=static_cast<uint8_t *>(scanoutGetStorage(resource));
+ if(storage[0x1CB]&8)return true;
+ for(unsigned i=0;i<arrsize(scanoutRing);++i)if(__atomic_load_n(&scanoutRing[i],__ATOMIC_ACQUIRE)==storage) {
+  __atomic_fetch_add(&scanoutUpgrades,1,__ATOMIC_RELAXED);return true;
+ }
+ return false;
+}
+static bool scanoutSerialize(void *,void *,OSSerialize *serializer) {
+ uint64_t r[] {1,__atomic_load_n(&scanoutFlips,__ATOMIC_RELAXED),__atomic_load_n(&scanoutUpgrades,__ATOMIC_RELAXED),
+  __atomic_load_n(&scanoutNext,__ATOMIC_RELAXED)};
+ auto out=OSData::withBytes(r,sizeof(r));if(!out)return false;
+ const bool result=out->serialize(serializer);out->release();return result;
+}
+static bool scanoutCoherentInstall(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size) {
+ static const uint8_t displayHead[] {0x55,0x48,0x89,0xE5,0xE8};
+ static const uint8_t displayTail[] {0x8A,0x80,0xCB,0x01,0,0,0x24,0x08,0xC0,0xE8,0x03,0x5D,0xC3};
+ static const uint8_t flipHead[] {0x55,0x48,0x89,0xE5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xEC,0x58};
+ const char *display="__ZN15IGAccelResource22isDisplayableIOSurfaceEv";
+ const char *flip="__ZN18IGAccelDisplayPipe12generateFlipEP12IOAccelEventjP16IOAccelResource2S3_";
+ bool ready=size>0x7FB80 &&
+  patcher.solveSymbol<mach_vm_address_t>(index,display,address,size)==address+0x751D6 &&
+  patcher.solveSymbol<mach_vm_address_t>(index,flip,address,size)==address+0x7FB6E;
+ patcher.clearError();
+ const auto at=reinterpret_cast<const uint8_t *>(address+0x751D6);
+ ready=ready && !memcmp(at,displayHead,sizeof(displayHead)) && !memcmp(at+9,displayTail,sizeof(displayTail)) &&
+  !memcmp(reinterpret_cast<const void *>(address+0x7FB6E),flipHead,sizeof(flipHead));
+ if(ready) {
+  int32_t rel;memcpy(&rel,at+5,sizeof(rel));
+  scanoutGetStorage=reinterpret_cast<void *(*)(void *)>(address+0x751D6+9+int64_t(rel));
+  KernelPatcher::RouteRequest routes[] {{flip,scanoutGenerateFlip,scanoutOrgFlip},{display,scanoutDisplayable,scanoutOrgDisplayable}};
+  ready=patcher.routeMultiple(index,routes,arrsize(routes),address,size);
+  patcher.clearError();
+ }
+ auto root=IORegistryEntry::getRegistryRoot();
+ root->setProperty("WEXScanoutCoherentReady",ready);
+ if(ready)if(auto live=OSSerializer::forTarget(nullptr,scanoutSerialize)) {root->setProperty("WEXScanoutCoherent",live);live->release();}
+ return ready;
+}
+
 bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size) {
  // Framebuffer-only mode must never enter the donor accelerator probe.
  // The bring-up payload omits this bundle; also reject it if already present.
@@ -11482,6 +11548,7 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
  if(adlnDetected && (checkKernelArgument("-wex-adln-kernel-ctx") || adlnNativeRCSProfileRequested))adlnPrepareRCSProfile(patcher,index,address,size);
  if(checkKernelArgument("-wex-reset-trace") || checkKernelArgument("-wex-reset-restore"))
   gpuResetTraceInstall(patcher,index,address,size);
+ if(checkKernelArgument("-wex-scanout-coherent"))scanoutCoherentInstall(patcher,index,address,size);
    // Serialize only the two direct stores in detectEDRAM. The original
    // forcewake and 1000ms sleep remain outside the shared gate.
    {

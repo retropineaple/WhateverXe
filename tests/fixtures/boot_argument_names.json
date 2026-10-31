@@ -143,6 +143,7 @@
   "-wex-noppguard": [],
   "-wex-reset-restore": [],
   "-wex-reset-trace": [],
+  "-wex-scanout-coherent": [],
   "-wex-adlp-load-only": [],
   "-wex-display13-offline": []
 }
